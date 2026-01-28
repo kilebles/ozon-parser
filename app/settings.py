@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     base_url: str = "https://www.ozon.ru"
     browser_state_path: str = "browser_state.json"
 
+    # Scroll delay settings (milliseconds)
+    scroll_networkidle_timeout: int = 2000  # Max wait for network to settle after scroll
+    scroll_fallback_delay: int = 300  # Fallback delay if networkidle times out
+    initial_load_networkidle_timeout: int = 3000  # Max wait for initial page load
+    initial_load_fallback_delay: int = 500  # Fallback delay if initial networkidle times out
+
     # City name for geolocation (default: Москва)
     geo_city: str = "Москва"
 
@@ -55,6 +61,10 @@ class Settings(BaseSettings):
 
     google_credentials_path: str = "credentials.json"
     google_spreadsheet_id: str = ""
+
+    # RuCaptcha settings
+    ru_captcha_api_key: str = ""
+    captcha_solve_timeout: int = 120  # Max seconds to wait for captcha solution
 
     @property
     def geo_coordinates(self) -> tuple[float, float, str]:

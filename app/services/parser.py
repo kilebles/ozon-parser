@@ -9,9 +9,9 @@ from playwright.async_api import (
     Playwright,
     BrowserContext,
 )
-
 from app.logging_config import get_logger
 from app.schemas import Product
+from app.services.captcha import RuCaptchaSolver, CaptchaSolverError
 from app.settings import settings
 
 logger = get_logger(__name__)
@@ -23,10 +23,11 @@ class OzonBlockedError(Exception):
 
 
 class OzonParser:
-    def __init__(self) -> None:
+    def __init__(self, captcha_solver: RuCaptchaSolver | None = None) -> None:
         self._browser: Browser | None = None
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
+        self._captcha_solver = captcha_solver
 
     async def __aenter__(self) -> "OzonParser":
         self._playwright = await async_playwright().start()
@@ -107,8 +108,16 @@ class OzonParser:
     async def _is_captcha_page(self, page: Page) -> bool:
         try:
             title = await page.title()
-            captcha_keywords = ["бот", "robot", "bot", "captcha", "подтверд", "confirm"]
+            captcha_keywords = ["бот", "robot", "bot", "captcha", "подтверд", "confirm", "antibot", "challenge"]
             return any(kw in title.lower() for kw in captcha_keywords)
+        except Exception:
+            return False
+
+    async def _is_antibot_challenge(self, page: Page) -> bool:
+        """Check if page is Ozon's antibot challenge (auto-solving JS check)."""
+        try:
+            title = await page.title()
+            return "antibot challenge" in title.lower()
         except Exception:
             return False
 
@@ -126,8 +135,31 @@ class OzonParser:
             return False
 
     async def _wait_for_captcha(self, page: Page) -> None:
-        """Wait for user to solve captcha manually."""
-        logger.warning("Captcha detected! Please solve it in the browser window...")
+        """Attempt to solve captcha automatically via RuCaptcha, fallback to manual."""
+        logger.warning("Captcha/challenge detected!")
+
+        # Check if it's Ozon's antibot challenge (auto-solving)
+        if await self._is_antibot_challenge(page):
+            logger.info("Ozon Antibot Challenge detected - waiting for automatic resolution...")
+            for i in range(30):  # Wait up to 30 seconds
+                await page.wait_for_timeout(1000)
+                if not await self._is_captcha_page(page):
+                    logger.info(f"Antibot challenge passed automatically in {i + 1}s")
+                    return
+            logger.warning("Antibot challenge timeout - may need manual intervention")
+            # Continue to manual fallback
+
+        # Try automatic solving if captcha solver is configured
+        if self._captcha_solver:
+            try:
+                solved = await self._solve_captcha_auto(page)
+                if solved:
+                    return
+            except CaptchaSolverError as e:
+                logger.warning(f"Automatic captcha solving failed: {e}")
+
+        # Fallback to manual solving
+        logger.warning("Please solve captcha manually in the browser window...")
         logger.info("You have 60 seconds to solve the captcha")
         for _ in range(60):
             if not await self._is_captcha_page(page):
@@ -135,6 +167,176 @@ class OzonParser:
                 return
             await page.wait_for_timeout(1000)
         logger.warning("Captcha timeout - proceeding anyway...")
+
+    async def _solve_captcha_auto(self, page: Page) -> bool:
+        """
+        Attempt to solve captcha automatically using RuCaptcha.
+
+        Returns True if captcha was solved, False if captcha type not supported.
+        """
+        if not self._captcha_solver:
+            return False
+
+        page_url = page.url
+
+        # Try to find Cloudflare Turnstile
+        turnstile_element = await page.query_selector(
+            "[data-sitekey].cf-turnstile, .cf-turnstile[data-sitekey], "
+            "iframe[src*='challenges.cloudflare.com']"
+        )
+        if turnstile_element:
+            # Get sitekey - either from element or from iframe parent
+            site_key = await turnstile_element.get_attribute("data-sitekey")
+            if not site_key:
+                # Try to find it in parent elements
+                parent = await page.query_selector(".cf-turnstile[data-sitekey]")
+                if parent:
+                    site_key = await parent.get_attribute("data-sitekey")
+
+            if site_key:
+                logger.info(f"Found Cloudflare Turnstile with sitekey: {site_key[:20]}...")
+
+                token = await self._captcha_solver.solve_turnstile(
+                    site_key=site_key,
+                    page_url=page_url,
+                )
+
+                # Inject Turnstile token
+                await page.evaluate("""
+                    (token) => {
+                        // Find turnstile response input
+                        const input = document.querySelector('[name="cf-turnstile-response"]');
+                        if (input) {
+                            input.value = token;
+                        }
+                        // Try callback
+                        if (typeof turnstile !== 'undefined' && turnstile.getResponse) {
+                            // Trigger form submit or callback
+                            const form = document.querySelector('form');
+                            if (form) form.submit();
+                        }
+                    }
+                """, token)
+
+                logger.info("Turnstile token injected")
+                await page.wait_for_timeout(3000)
+
+                if not await self._is_captcha_page(page):
+                    logger.info("Turnstile solved successfully!")
+                    return True
+
+                logger.warning("Turnstile token injection didn't work")
+
+        # Try to find reCAPTCHA
+        recaptcha_element = await page.query_selector("[data-sitekey]")
+        if recaptcha_element:
+            site_key = await recaptcha_element.get_attribute("data-sitekey")
+            if site_key:
+                logger.info(f"Found reCAPTCHA v2 with sitekey: {site_key[:20]}...")
+
+                # Check if invisible
+                size = await recaptcha_element.get_attribute("data-size")
+                invisible = size == "invisible"
+
+                # Solve reCAPTCHA
+                token = await self._captcha_solver.solve_recaptcha_v2(
+                    site_key=site_key,
+                    page_url=page_url,
+                    invisible=invisible,
+                )
+
+                # Inject the token
+                await page.evaluate("""
+                    (token) => {
+                        const textarea = document.querySelector('#g-recaptcha-response');
+                        if (textarea) {
+                            textarea.value = token;
+                            textarea.style.display = 'block';
+                        }
+                        // Also try to find hidden textarea in iframe
+                        const hiddenTextarea = document.querySelector('[name="g-recaptcha-response"]');
+                        if (hiddenTextarea) {
+                            hiddenTextarea.value = token;
+                        }
+                        // Trigger callback if exists
+                        if (typeof ___grecaptcha_cfg !== 'undefined') {
+                            const clients = ___grecaptcha_cfg.clients;
+                            if (clients) {
+                                for (const key in clients) {
+                                    const client = clients[key];
+                                    if (client && client.callback) {
+                                        client.callback(token);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                """, token)
+
+                logger.info("reCAPTCHA token injected, submitting...")
+
+                # Try to click submit button
+                submit_button = await page.query_selector(
+                    "button[type='submit'], input[type='submit'], .captcha-submit, button:has-text('Подтвердить')"
+                )
+                if submit_button:
+                    await submit_button.click()
+                    await page.wait_for_timeout(3000)
+
+                # Check if captcha is gone
+                if not await self._is_captcha_page(page):
+                    logger.info("reCAPTCHA solved successfully!")
+                    return True
+
+                logger.warning("reCAPTCHA token injection didn't work")
+                return False
+
+        # Try to find image captcha
+        captcha_image = await page.query_selector(
+            "img[src*='captcha'], img[alt*='captcha'], .captcha-image img"
+        )
+        if captcha_image:
+            logger.info("Found image captcha")
+
+            # Get image as base64
+            src = await captcha_image.get_attribute("src")
+            if src and src.startswith("data:image"):
+                # Already base64
+                image_base64 = src.split(",")[1]
+            else:
+                # Screenshot the element
+                image_bytes = await captcha_image.screenshot()
+                import base64
+                image_base64 = base64.b64encode(image_bytes).decode()
+
+            # Solve image captcha
+            text = await self._captcha_solver.solve_image_captcha(image_base64)
+            logger.info(f"Image captcha solved: {text}")
+
+            # Find input field and enter text
+            captcha_input = await page.query_selector(
+                "input[name*='captcha'], input[id*='captcha'], input[placeholder*='код'], input[type='text']"
+            )
+            if captcha_input:
+                await captcha_input.fill(text)
+
+                # Submit
+                submit_button = await page.query_selector(
+                    "button[type='submit'], input[type='submit'], button:has-text('Подтвердить')"
+                )
+                if submit_button:
+                    await submit_button.click()
+                    await page.wait_for_timeout(3000)
+
+                if not await self._is_captcha_page(page):
+                    logger.info("Image captcha solved successfully!")
+                    return True
+
+            logger.warning("Image captcha solving didn't work")
+            return False
+
+        logger.warning("Unknown captcha type, cannot solve automatically")
+        return False
 
     async def _handle_block_page(self, page: Page, max_retries: int = 3) -> bool:
         """
@@ -194,12 +396,18 @@ class OzonParser:
         return new_products
 
     async def find_product_position(
-        self, query: str, target_article: str, max_position: int = 1000
+        self, query: str, target_article: str, max_position: int = 1000, page: Page | None = None
     ) -> int | None:
         """
         Search for a product position in Ozon search results using infinite scroll.
 
         Returns the position (1-based) or None if not found within max_position.
+
+        Args:
+            query: Search query
+            target_article: Product article/ID to find
+            max_position: Maximum position to search
+            page: Optional existing page to reuse (for performance)
         """
         logger.info(f"{'='*60}")
         logger.info(f"Searching position for article {target_article}")
@@ -207,7 +415,11 @@ class OzonParser:
         logger.info(f"Region: {settings.geo_city}")
         logger.info(f"{'='*60}")
 
-        page = await self._new_page()
+        # Reuse page if provided, otherwise create new one
+        page_provided = page is not None
+        if not page_provided:
+            page = await self._new_page()
+
         seen_products: set[str] = set()
         position = 0
         scroll_count = 0
@@ -223,7 +435,13 @@ class OzonParser:
                 logger.debug("Products loaded on page")
             except Exception:
                 logger.warning("Timeout waiting for products to appear")
-            await page.wait_for_timeout(1000)
+
+            # Wait for network to settle instead of fixed timeout
+            try:
+                await page.wait_for_load_state("networkidle", timeout=settings.initial_load_networkidle_timeout)
+            except Exception:
+                # If networkidle times out, wait a bit anyway
+                await page.wait_for_timeout(settings.initial_load_fallback_delay)
 
             if await self._is_captcha_page(page):
                 await self._wait_for_captcha(page)
@@ -277,7 +495,13 @@ class OzonParser:
                 # Scroll down aggressively
                 scroll_count += 1
                 await page.evaluate("if(document.body) window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1000)
+
+                # Wait for network to settle after scroll instead of fixed timeout
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=settings.scroll_networkidle_timeout)
+                except Exception:
+                    # If networkidle times out, wait minimally
+                    await page.wait_for_timeout(settings.scroll_fallback_delay)
 
                 # Check for captcha or block after scroll
                 if await self._is_captcha_page(page):
@@ -321,7 +545,9 @@ class OzonParser:
             return None
 
         finally:
-            await page.close()
+            # Only close page if we created it ourselves
+            if not page_provided:
+                await page.close()
 
     async def parse_product(self, url: str) -> Product:
         logger.info(f"Parsing product: {url}")
