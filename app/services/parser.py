@@ -510,13 +510,14 @@ class OzonParser:
             # Handle block page
             if await self._is_blocked_page(page):
                 if not await self._handle_block_page(page):
-                    logger.error("Failed to bypass block page - stopping parser")
-                    raise OzonBlockedError(
-                        "Ozon заблокировал доступ. Попробуйте: "
-                        "1) Подождать 15-30 минут, "
-                        "2) Сменить IP (VPN/прокси), "
-                        "3) Удалить browser_data/"
-                    )
+                    logger.warning("Failed to bypass block page, will retry after pause")
+                    # Wait and retry once with a fresh page load
+                    await page.wait_for_timeout(15000)
+                    await page.goto(search_url, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(5000)
+                    if await self._is_blocked_page(page):
+                        logger.error("Still blocked after retry - skipping this query")
+                        return None
 
             # Collect initial products
             new_products = await self._collect_products_from_page(page, seen_products)

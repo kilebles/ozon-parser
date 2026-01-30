@@ -194,12 +194,17 @@ class PositionTracker:
                 logger.info(f"[{i}/{len(tasks)}] Article: {task.article}, Query: {task.query}")
 
                 # Reuse the same page for all requests
-                position = await self.parser.find_product_position(
-                    query=task.query,
-                    target_article=task.article,
-                    max_position=max_position,
-                    page=page,
-                )
+                try:
+                    position = await self.parser.find_product_position(
+                        query=task.query,
+                        target_article=task.article,
+                        max_position=max_position,
+                        page=page,
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing query '{task.query}': {e}")
+                    logger.info("Skipping query and continuing with next one...")
+                    position = None
 
                 # Prepare result: position number or "1000+" if not found
                 result = str(position) if position else f"{max_position}+"
