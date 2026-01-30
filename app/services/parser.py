@@ -35,7 +35,7 @@ class OzonParser:
         user_data_dir = Path("browser_data")
         user_data_dir.mkdir(exist_ok=True)
 
-        self._context = await self._playwright.chromium.launch_persistent_context(
+        launch_options = dict(
             user_data_dir=str(user_data_dir),
             headless=settings.browser_headless,
             args=[
@@ -55,6 +55,21 @@ class OzonParser:
                 "longitude": settings.geo_longitude,
             },
             permissions=["geolocation"],
+        )
+
+        if settings.proxy_url:
+            from urllib.parse import urlparse
+            parsed = urlparse(settings.proxy_url)
+            proxy = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+            if parsed.username:
+                proxy["username"] = parsed.username
+            if parsed.password:
+                proxy["password"] = parsed.password
+            launch_options["proxy"] = proxy
+            logger.info(f"Using proxy: {parsed.hostname}:{parsed.port}")
+
+        self._context = await self._playwright.chromium.launch_persistent_context(
+            **launch_options
         )
 
         # Log current region

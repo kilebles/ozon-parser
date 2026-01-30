@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     google_credentials_path: str = "credentials.json"
     google_spreadsheet_id: str = ""
 
+    # Proxy settings (format: http://user:pass@host:port or socks5://host:port)
+    proxy_url: str = ""
+
     # RuCaptcha settings
     ru_captcha_api_key: str = ""
     captcha_solve_timeout: int = 120  # Max seconds to wait for captcha solution
