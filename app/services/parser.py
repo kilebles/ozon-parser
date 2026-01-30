@@ -358,6 +358,21 @@ class OzonParser:
         Handle 'Доступ ограничен' block page by clicking 'Обновить'.
         Returns True if successfully bypassed, False otherwise.
         """
+        # Save debug info on first detection
+        try:
+            await page.screenshot(path="debug_block_page.png")
+            logger.info("Block page screenshot saved to debug_block_page.png")
+            title = await page.title()
+            url = page.url
+            logger.info(f"Block page URL: {url}")
+            logger.info(f"Block page title: {title}")
+            content = await page.content()
+            with open("debug_block_page.html", "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Block page HTML saved to debug_block_page.html")
+        except Exception as e:
+            logger.warning(f"Failed to save debug info: {e}")
+
         for attempt in range(max_retries):
             if not await self._is_blocked_page(page):
                 return True
