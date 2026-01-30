@@ -67,6 +67,7 @@ class OzonParser:
                 proxy["password"] = parsed.password
             launch_options["proxy"] = proxy
             logger.info(f"Using proxy: {parsed.hostname}:{parsed.port}")
+            logger.debug(f"Proxy config: server={proxy['server']}, username={proxy.get('username')}")
 
         self._context = await self._playwright.chromium.launch_persistent_context(
             **launch_options
@@ -457,7 +458,20 @@ class OzonParser:
         try:
             search_url = f"{settings.base_url}/search/?text={query}&from_global=true"
             logger.debug(f"Opening URL: {search_url}")
-            await page.goto(search_url, wait_until="domcontentloaded")
+            try:
+                await page.goto(search_url, wait_until="domcontentloaded")
+            except Exception as e:
+                if "Timeout" in str(e):
+                    logger.warning(f"Page load timeout, checking for antibot challenge...")
+                    # Give the antibot challenge time to resolve
+                    try:
+                        await page.wait_for_selector("a[href*='/product/']", timeout=60000)
+                        logger.info("Antibot challenge passed, products loaded")
+                    except Exception:
+                        logger.error("Antibot challenge did not resolve within 60s")
+                        raise
+                else:
+                    raise
 
             # Wait for products to load (not just DOM ready)
             try:
@@ -524,7 +538,10 @@ class OzonParser:
             while position < max_position:
                 # Scroll down aggressively
                 scroll_count += 1
-                await page.evaluate("if(document.body) window.scrollTo(0, document.body.scrollHeight)")
+                # Use mouse wheel to trigger IntersectionObserver-based lazy loading
+                await page.mouse.wheel(0, 3000)
+                await page.wait_for_timeout(200)
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
 
                 # Wait for network to settle after scroll instead of fixed timeout
                 try:
