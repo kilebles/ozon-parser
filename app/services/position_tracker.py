@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.logging_config import get_logger
-from app.services.parser import OzonParser
+from app.services.parser import OzonParser, OzonBlockedError
 from app.services.sheets import GoogleSheetsService
 
 logger = get_logger(__name__)
@@ -201,9 +201,24 @@ class PositionTracker:
                         max_position=max_position,
                         page=page,
                     )
+                except OzonBlockedError:
+                    logger.warning("Block detected - restarting browser and retrying query...")
+                    await page.close()
+                    await self.parser.restart_browser()
+                    page = await self.parser._new_page()
+                    # Retry the same query after restart
+                    try:
+                        position = await self.parser.find_product_position(
+                            query=task.query,
+                            target_article=task.article,
+                            max_position=max_position,
+                            page=page,
+                        )
+                    except Exception as e:
+                        logger.error(f"Still failing after restart: {e}")
+                        position = None
                 except Exception as e:
                     logger.error(f"Error processing query '{task.query}': {e}")
-                    logger.info("Skipping query and continuing with next one...")
                     position = None
 
                 # Prepare result: position number or "1000+" if not found

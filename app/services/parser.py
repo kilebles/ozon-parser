@@ -1,5 +1,6 @@
 import platform
 import re
+import shutil
 from decimal import Decimal
 from pathlib import Path
 
@@ -30,9 +31,7 @@ class OzonParser:
         self._context: BrowserContext | None = None
         self._captcha_solver = captcha_solver
 
-    async def __aenter__(self) -> "OzonParser":
-        self._playwright = await async_playwright().start()
-
+    def _build_launch_options(self) -> dict:
         user_data_dir = Path("browser_data")
         user_data_dir.mkdir(exist_ok=True)
 
@@ -72,8 +71,12 @@ class OzonParser:
                 proxy["password"] = parsed.password
             launch_options["proxy"] = proxy
             logger.info(f"Using proxy: {parsed.hostname}:{parsed.port}")
-            logger.debug(f"Proxy config: server={proxy['server']}, username={proxy.get('username')}")
 
+        return launch_options
+
+    async def __aenter__(self) -> "OzonParser":
+        self._playwright = await async_playwright().start()
+        launch_options = self._build_launch_options()
         self._context = await self._playwright.chromium.launch_persistent_context(
             **launch_options
         )
@@ -95,6 +98,28 @@ class OzonParser:
             await self._context.close()
         if self._playwright:
             await self._playwright.stop()
+
+    async def restart_browser(self) -> None:
+        """Close browser, wipe browser_data, and relaunch with clean profile."""
+        logger.info("Restarting browser with clean profile...")
+        if self._context:
+            await self._context.close()
+            self._context = None
+
+        # Wipe browser data
+        browser_data = Path("browser_data")
+        if browser_data.exists():
+            shutil.rmtree(browser_data)
+            logger.info("Deleted browser_data/")
+
+        # Relaunch
+        if not self._playwright:
+            self._playwright = await async_playwright().start()
+        launch_options = self._build_launch_options()
+        self._context = await self._playwright.chromium.launch_persistent_context(
+            **launch_options
+        )
+        logger.info("Browser restarted with clean profile")
 
     async def _new_page(self) -> Page:
         if not self._context:
@@ -510,14 +535,8 @@ class OzonParser:
             # Handle block page
             if await self._is_blocked_page(page):
                 if not await self._handle_block_page(page):
-                    logger.warning("Failed to bypass block page, will retry after pause")
-                    # Wait and retry once with a fresh page load
-                    await page.wait_for_timeout(15000)
-                    await page.goto(search_url, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(5000)
-                    if await self._is_blocked_page(page):
-                        logger.error("Still blocked after retry - skipping this query")
-                        return None
+                    logger.warning("Failed to bypass block page, restarting browser...")
+                    raise OzonBlockedError("block_restart")
 
             # Collect initial products
             new_products = await self._collect_products_from_page(page, seen_products)
