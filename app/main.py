@@ -1,5 +1,8 @@
 import asyncio
+import fcntl
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from app.logging_config import setup_logging, get_logger
 from app.services import GoogleSheetsService, OzonBlockedError
@@ -9,6 +12,8 @@ from app.services.position_tracker import PositionTracker
 from app.settings import settings
 
 logger = get_logger(__name__)
+
+LOCK_FILE = Path("/tmp/ozon-parser.lock")
 
 
 def create_captcha_solver() -> RuCaptchaSolver | None:
@@ -54,4 +59,15 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    lock_fp = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Another instance is already running, exiting.")
+        sys.exit(0)
+
+    try:
+        asyncio.run(main())
+    finally:
+        fcntl.flock(lock_fp, fcntl.LOCK_UN)
+        lock_fp.close()
