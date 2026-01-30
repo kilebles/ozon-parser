@@ -1,4 +1,5 @@
 import platform
+import random
 import re
 import shutil
 from decimal import Decimal
@@ -7,7 +8,6 @@ from pathlib import Path
 from playwright.async_api import (
     async_playwright,
     Page,
-    Browser,
     Playwright,
     BrowserContext,
 )
@@ -26,7 +26,6 @@ class OzonBlockedError(Exception):
 
 class OzonParser:
     def __init__(self, captcha_solver: RuCaptchaSolver | None = None) -> None:
-        self._browser: Browser | None = None
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
         self._captcha_solver = captcha_solver
@@ -35,7 +34,7 @@ class OzonParser:
         user_data_dir = Path("browser_data")
         user_data_dir.mkdir(exist_ok=True)
 
-        launch_options = dict(
+        return dict(
             user_data_dir=str(user_data_dir),
             headless=settings.browser_headless,
             args=[
@@ -53,45 +52,14 @@ class OzonParser:
             ),
             viewport={"width": 1920, "height": 1080},
             locale="ru-RU",
-            timezone_id=settings.geo_timezone,
-            geolocation={
-                "latitude": settings.geo_latitude,
-                "longitude": settings.geo_longitude,
-            },
-            permissions=["geolocation"],
         )
-
-        if settings.proxy_url:
-            from urllib.parse import urlparse
-            parsed = urlparse(settings.proxy_url)
-            proxy = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
-            if parsed.username:
-                proxy["username"] = parsed.username
-            if parsed.password:
-                proxy["password"] = parsed.password
-            launch_options["proxy"] = proxy
-            logger.info(f"Using proxy: {parsed.hostname}:{parsed.port}")
-
-        return launch_options
 
     async def __aenter__(self) -> "OzonParser":
         self._playwright = await async_playwright().start()
-        launch_options = self._build_launch_options()
         self._context = await self._playwright.chromium.launch_persistent_context(
-            **launch_options
+            **self._build_launch_options()
         )
-
-        # Log current region
-        self._log_current_region()
-
         return self
-
-    def _log_current_region(self) -> None:
-        """Log the configured region for parsing."""
-        logger.info(
-            f"Parsing region: {settings.geo_city} "
-            f"(lat={settings.geo_latitude}, lon={settings.geo_longitude}, tz={settings.geo_timezone})"
-        )
 
     async def __aexit__(self, *_) -> None:
         if self._context:
@@ -106,18 +74,15 @@ class OzonParser:
             await self._context.close()
             self._context = None
 
-        # Wipe browser data
         browser_data = Path("browser_data")
         if browser_data.exists():
             shutil.rmtree(browser_data)
             logger.info("Deleted browser_data/")
 
-        # Relaunch
         if not self._playwright:
             self._playwright = await async_playwright().start()
-        launch_options = self._build_launch_options()
         self._context = await self._playwright.chromium.launch_persistent_context(
-            **launch_options
+            **self._build_launch_options()
         )
         logger.info("Browser restarted with clean profile")
 
@@ -127,6 +92,16 @@ class OzonParser:
         page = await self._context.new_page()
         page.set_default_timeout(settings.browser_timeout)
         return page
+
+    async def _warmup(self, page: Page) -> None:
+        """Visit homepage before searching to look like a real user."""
+        logger.info("Warming up: visiting ozon.ru homepage")
+        try:
+            await page.goto(settings.base_url, wait_until="domcontentloaded")
+            await page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            await page.wait_for_timeout(2000)
+        logger.info("Warmup complete")
 
     @staticmethod
     def _parse_price(price_text: str | None) -> Decimal | None:
@@ -159,18 +134,9 @@ class OzonParser:
         except Exception:
             return False
 
-    async def _is_antibot_challenge(self, page: Page) -> bool:
-        """Check if page is Ozon's antibot challenge (auto-solving JS check)."""
-        try:
-            title = await page.title()
-            return "antibot challenge" in title.lower()
-        except Exception:
-            return False
-
     async def _is_blocked_page(self, page: Page) -> bool:
         """Check if we hit the 'Доступ ограничен' block page."""
         try:
-            # Check for block page heading
             heading = await page.query_selector("h1")
             if heading:
                 text = await heading.inner_text()
@@ -183,17 +149,6 @@ class OzonParser:
     async def _wait_for_captcha(self, page: Page) -> None:
         """Attempt to solve captcha automatically via RuCaptcha, fallback to manual."""
         logger.warning("Captcha/challenge detected!")
-
-        # Check if it's Ozon's antibot challenge (auto-solving)
-        if await self._is_antibot_challenge(page):
-            logger.info("Ozon Antibot Challenge detected - waiting for automatic resolution...")
-            for i in range(30):  # Wait up to 30 seconds
-                await page.wait_for_timeout(1000)
-                if not await self._is_captcha_page(page):
-                    logger.info(f"Antibot challenge passed automatically in {i + 1}s")
-                    return
-            logger.warning("Antibot challenge timeout - may need manual intervention")
-            # Continue to manual fallback
 
         # Try automatic solving if captcha solver is configured
         if self._captcha_solver:
@@ -215,171 +170,100 @@ class OzonParser:
         logger.warning("Captcha timeout - proceeding anyway...")
 
     async def _solve_captcha_auto(self, page: Page) -> bool:
-        """
-        Attempt to solve captcha automatically using RuCaptcha.
-
-        Returns True if captcha was solved, False if captcha type not supported.
-        """
+        """Attempt to solve captcha automatically using RuCaptcha."""
         if not self._captcha_solver:
             return False
 
         page_url = page.url
 
-        # Try to find Cloudflare Turnstile
+        # Try Cloudflare Turnstile
         turnstile_element = await page.query_selector(
             "[data-sitekey].cf-turnstile, .cf-turnstile[data-sitekey], "
             "iframe[src*='challenges.cloudflare.com']"
         )
         if turnstile_element:
-            # Get sitekey - either from element or from iframe parent
             site_key = await turnstile_element.get_attribute("data-sitekey")
             if not site_key:
-                # Try to find it in parent elements
                 parent = await page.query_selector(".cf-turnstile[data-sitekey]")
                 if parent:
                     site_key = await parent.get_attribute("data-sitekey")
 
             if site_key:
                 logger.info(f"Found Cloudflare Turnstile with sitekey: {site_key[:20]}...")
-
                 token = await self._captcha_solver.solve_turnstile(
-                    site_key=site_key,
-                    page_url=page_url,
+                    site_key=site_key, page_url=page_url,
                 )
-
-                # Inject Turnstile token
                 await page.evaluate("""
                     (token) => {
-                        // Find turnstile response input
                         const input = document.querySelector('[name="cf-turnstile-response"]');
-                        if (input) {
-                            input.value = token;
-                        }
-                        // Try callback
-                        if (typeof turnstile !== 'undefined' && turnstile.getResponse) {
-                            // Trigger form submit or callback
-                            const form = document.querySelector('form');
-                            if (form) form.submit();
-                        }
+                        if (input) input.value = token;
+                        const form = document.querySelector('form');
+                        if (form) form.submit();
                     }
                 """, token)
-
-                logger.info("Turnstile token injected")
                 await page.wait_for_timeout(3000)
-
                 if not await self._is_captcha_page(page):
                     logger.info("Turnstile solved successfully!")
                     return True
 
-                logger.warning("Turnstile token injection didn't work")
-
-        # Try to find reCAPTCHA
+        # Try reCAPTCHA
         recaptcha_element = await page.query_selector("[data-sitekey]")
         if recaptcha_element:
             site_key = await recaptcha_element.get_attribute("data-sitekey")
             if site_key:
                 logger.info(f"Found reCAPTCHA v2 with sitekey: {site_key[:20]}...")
-
-                # Check if invisible
                 size = await recaptcha_element.get_attribute("data-size")
-                invisible = size == "invisible"
-
-                # Solve reCAPTCHA
                 token = await self._captcha_solver.solve_recaptcha_v2(
-                    site_key=site_key,
-                    page_url=page_url,
-                    invisible=invisible,
+                    site_key=site_key, page_url=page_url, invisible=size == "invisible",
                 )
-
-                # Inject the token
                 await page.evaluate("""
                     (token) => {
                         const textarea = document.querySelector('#g-recaptcha-response');
-                        if (textarea) {
-                            textarea.value = token;
-                            textarea.style.display = 'block';
-                        }
-                        // Also try to find hidden textarea in iframe
-                        const hiddenTextarea = document.querySelector('[name="g-recaptcha-response"]');
-                        if (hiddenTextarea) {
-                            hiddenTextarea.value = token;
-                        }
-                        // Trigger callback if exists
-                        if (typeof ___grecaptcha_cfg !== 'undefined') {
-                            const clients = ___grecaptcha_cfg.clients;
-                            if (clients) {
-                                for (const key in clients) {
-                                    const client = clients[key];
-                                    if (client && client.callback) {
-                                        client.callback(token);
-                                    }
-                                }
-                            }
-                        }
+                        if (textarea) { textarea.value = token; textarea.style.display = 'block'; }
+                        const hidden = document.querySelector('[name="g-recaptcha-response"]');
+                        if (hidden) hidden.value = token;
                     }
                 """, token)
-
-                logger.info("reCAPTCHA token injected, submitting...")
-
-                # Try to click submit button
-                submit_button = await page.query_selector(
-                    "button[type='submit'], input[type='submit'], .captcha-submit, button:has-text('Подтвердить')"
+                submit = await page.query_selector(
+                    "button[type='submit'], input[type='submit'], button:has-text('Подтвердить')"
                 )
-                if submit_button:
-                    await submit_button.click()
+                if submit:
+                    await submit.click()
                     await page.wait_for_timeout(3000)
-
-                # Check if captcha is gone
                 if not await self._is_captcha_page(page):
                     logger.info("reCAPTCHA solved successfully!")
                     return True
 
-                logger.warning("reCAPTCHA token injection didn't work")
-                return False
-
-        # Try to find image captcha
+        # Try image captcha
         captcha_image = await page.query_selector(
             "img[src*='captcha'], img[alt*='captcha'], .captcha-image img"
         )
         if captcha_image:
             logger.info("Found image captcha")
-
-            # Get image as base64
             src = await captcha_image.get_attribute("src")
             if src and src.startswith("data:image"):
-                # Already base64
                 image_base64 = src.split(",")[1]
             else:
-                # Screenshot the element
-                image_bytes = await captcha_image.screenshot()
                 import base64
+                image_bytes = await captcha_image.screenshot()
                 image_base64 = base64.b64encode(image_bytes).decode()
 
-            # Solve image captcha
             text = await self._captcha_solver.solve_image_captcha(image_base64)
             logger.info(f"Image captcha solved: {text}")
-
-            # Find input field and enter text
             captcha_input = await page.query_selector(
                 "input[name*='captcha'], input[id*='captcha'], input[placeholder*='код'], input[type='text']"
             )
             if captcha_input:
                 await captcha_input.fill(text)
-
-                # Submit
-                submit_button = await page.query_selector(
+                submit = await page.query_selector(
                     "button[type='submit'], input[type='submit'], button:has-text('Подтвердить')"
                 )
-                if submit_button:
-                    await submit_button.click()
+                if submit:
+                    await submit.click()
                     await page.wait_for_timeout(3000)
-
                 if not await self._is_captcha_page(page):
                     logger.info("Image captcha solved successfully!")
                     return True
-
-            logger.warning("Image captcha solving didn't work")
-            return False
 
         logger.warning("Unknown captcha type, cannot solve automatically")
         return False
@@ -387,49 +271,28 @@ class OzonParser:
     async def _handle_block_page(self, page: Page, max_retries: int = 3) -> bool:
         """
         Handle 'Доступ ограничен' block page.
-        First waits for JS challenge to resolve automatically, then retries.
-        Returns True if successfully bypassed, False otherwise.
+        Waits for JS challenge to resolve, then retries with refresh.
         """
-        # Save debug info on first detection
-        try:
-            await page.screenshot(path="debug_block_page.png")
-            logger.info("Block page screenshot saved to debug_block_page.png")
-            title = await page.title()
-            url = page.url
-            logger.info(f"Block page URL: {url}")
-            logger.info(f"Block page title: {title}")
-            content = await page.content()
-            with open("debug_block_page.html", "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info("Block page HTML saved to debug_block_page.html")
-        except Exception as e:
-            logger.warning(f"Failed to save debug info: {e}")
+        logger.info("Block page detected, waiting for JS challenge to resolve...")
 
-        # First, wait for JS challenge to resolve automatically (up to 30s)
-        logger.info("Waiting for JS antibot challenge to resolve...")
-        for i in range(15):
+        # Wait for JS challenge (up to 10s)
+        for i in range(5):
             await page.wait_for_timeout(2000)
             if not await self._is_blocked_page(page):
                 logger.info(f"JS challenge resolved after {(i + 1) * 2}s")
                 return True
-            logger.debug(f"Still blocked, waiting... ({(i + 1) * 2}s)")
 
-        # If challenge didn't resolve, try refresh
+        # Try refresh
         for attempt in range(max_retries):
             if not await self._is_blocked_page(page):
                 return True
-
-            logger.warning(f"Block page detected, attempting refresh (attempt {attempt + 1}/{max_retries})")
-
-            # Try clicking the "Обновить" button
+            logger.warning(f"Still blocked, refreshing (attempt {attempt + 1}/{max_retries})")
             refresh_button = await page.query_selector("button:has-text('Обновить')")
             if refresh_button:
                 await refresh_button.click()
-                await page.wait_for_timeout(5000)
             else:
-                # Fallback to page reload
                 await page.reload()
-                await page.wait_for_timeout(5000)
+            await page.wait_for_timeout(5000)
 
         return not await self._is_blocked_page(page)
 
@@ -439,17 +302,12 @@ class OzonParser:
             return None
         if "/reviews" in href or "/questions" in href:
             return None
-
         product_path = href.split("/product/")[-1].split("?")[0].rstrip("/")
         parts = product_path.split("-")
         if not parts:
             return None
-
         product_id = parts[-1]
-        if not product_id.isdigit():
-            return None
-
-        return product_id
+        return product_id if product_id.isdigit() else None
 
     async def _collect_products_from_page(
         self, page: Page, seen_products: set[str]
@@ -457,14 +315,12 @@ class OzonParser:
         """Collect new product IDs from current page state."""
         links = await page.query_selector_all("a[href*='/product/']")
         new_products: list[str] = []
-
         for link in links:
             href = await link.get_attribute("href")
             product_id = self._extract_product_id(href)
             if product_id and product_id not in seen_products:
                 seen_products.add(product_id)
                 new_products.append(product_id)
-
         return new_products
 
     async def find_product_position(
@@ -472,22 +328,13 @@ class OzonParser:
     ) -> int | None:
         """
         Search for a product position in Ozon search results using infinite scroll.
-
         Returns the position (1-based) or None if not found within max_position.
-
-        Args:
-            query: Search query
-            target_article: Product article/ID to find
-            max_position: Maximum position to search
-            page: Optional existing page to reuse (for performance)
         """
         logger.info(f"{'='*60}")
         logger.info(f"Searching position for article {target_article}")
         logger.info(f"Query: {query}")
-        logger.info(f"Region: {settings.geo_city}")
         logger.info(f"{'='*60}")
 
-        # Reuse page if provided, otherwise create new one
         page_provided = page is not None
         if not page_provided:
             page = await self._new_page()
@@ -497,35 +344,33 @@ class OzonParser:
         scroll_count = 0
 
         try:
-            search_url = f"{settings.base_url}/search/?text={query}&from_global=true"
+            search_url = f"{settings.base_url}/search/?text={query}"
             logger.debug(f"Opening URL: {search_url}")
             try:
                 await page.goto(search_url, wait_until="domcontentloaded")
             except Exception as e:
                 if "Timeout" in str(e):
-                    logger.warning(f"Page load timeout, checking for antibot challenge...")
-                    # Give the antibot challenge time to resolve
+                    logger.warning("Page load timeout, waiting for products...")
                     try:
                         await page.wait_for_selector("a[href*='/product/']", timeout=60000)
-                        logger.info("Antibot challenge passed, products loaded")
+                        logger.info("Products loaded after extended wait")
                     except Exception:
-                        logger.error("Antibot challenge did not resolve within 60s")
+                        logger.error("Products did not load within 60s")
                         raise
                 else:
                     raise
 
-            # Wait for products to load (not just DOM ready)
+            # Wait for products to load
             try:
                 await page.wait_for_selector("a[href*='/product/']", timeout=15000)
                 logger.debug("Products loaded on page")
             except Exception:
                 logger.warning("Timeout waiting for products to appear")
 
-            # Wait for network to settle instead of fixed timeout
+            # Wait for network to settle
             try:
                 await page.wait_for_load_state("networkidle", timeout=settings.initial_load_networkidle_timeout)
             except Exception:
-                # If networkidle times out, wait a bit anyway
                 await page.wait_for_timeout(settings.initial_load_fallback_delay)
 
             if await self._is_captcha_page(page):
@@ -535,31 +380,11 @@ class OzonParser:
             # Handle block page
             if await self._is_blocked_page(page):
                 if not await self._handle_block_page(page):
-                    logger.warning("Failed to bypass block page, restarting browser...")
                     raise OzonBlockedError("block_restart")
 
             # Collect initial products
             new_products = await self._collect_products_from_page(page, seen_products)
             logger.info(f"Initial load: found {len(new_products)} products")
-
-            # Diagnostic: if no products found initially, log page state
-            if not new_products:
-                logger.warning(f"No products found on initial load. URL: {page.url}")
-                # Save screenshot for debugging
-                screenshot_path = f"debug_screenshot_{target_article}.png"
-                await page.screenshot(path=screenshot_path)
-                logger.warning(f"Screenshot saved to {screenshot_path}")
-                # Check if we got redirected or blocked
-                all_links = await page.query_selector_all("a")
-                logger.warning(f"Total links on page: {len(all_links)}")
-                # Sample some hrefs for debugging
-                sample_hrefs = []
-                for link in all_links[:10]:
-                    href = await link.get_attribute("href")
-                    if href:
-                        sample_hrefs.append(href)
-                if sample_hrefs:
-                    logger.warning(f"Sample hrefs: {sample_hrefs}")
 
             for product_id in new_products:
                 position += 1
@@ -569,24 +394,26 @@ class OzonParser:
 
             # Scroll and load more products
             no_new_products_count = 0
-            max_no_new_products = 10  # Stop after 10 scrolls with no new products
+            max_no_new_products = 5
 
             while position < max_position:
-                # Scroll down aggressively
                 scroll_count += 1
-                # Use mouse wheel to trigger IntersectionObserver-based lazy loading
-                await page.mouse.wheel(0, 3000)
+
+                prev_height = await page.evaluate("document.body.scrollHeight")
+
+                await page.mouse.wheel(0, random.randint(2000, 5000))
                 await page.wait_for_timeout(200)
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
 
-                # Wait for network to settle after scroll instead of fixed timeout
+                # Wait for page height to grow (means new content loaded)
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=settings.scroll_networkidle_timeout)
+                    await page.wait_for_function(
+                        f"document.body.scrollHeight > {prev_height}",
+                        timeout=settings.scroll_networkidle_timeout,
+                    )
                 except Exception:
-                    # If networkidle times out, wait minimally
-                    await page.wait_for_timeout(settings.scroll_fallback_delay)
+                    pass  # timeout — page didn't grow, maybe at the bottom
 
-                # Check for captcha or block after scroll
                 if await self._is_captcha_page(page):
                     await self._wait_for_captcha(page)
                     await page.wait_for_timeout(2000)
@@ -596,10 +423,15 @@ class OzonParser:
                         logger.error("Failed to bypass block page during scroll")
                         break
 
-                # Collect new products
                 new_products = await self._collect_products_from_page(page, seen_products)
+                current_height = await page.evaluate("document.body.scrollHeight")
 
                 if not new_products:
+                    if current_height == prev_height:
+                        # Страница не выросла и новых товаров нет — достигли конца
+                        logger.info(f"Reached end of page, total checked: {position}")
+                        break
+                    # Страница выросла (подгрузился футер/баннер), но товаров нет
                     no_new_products_count += 1
                     if no_new_products_count >= max_no_new_products:
                         logger.info(f"No more products loading, total checked: {position}")
@@ -615,12 +447,11 @@ class OzonParser:
                         logger.info(f"FOUND! Article {target_article} at position {position}")
                         logger.info(f"Total scrolls: {scroll_count}, total products checked: {position}")
                         return position
-
                     if position >= max_position:
                         logger.info(f"Reached max position {max_position}, article not found")
                         return None
 
-                if position % 50 == 0:
+                if position % 300 == 0:
                     logger.info(f"Progress: checked {position} products (scroll #{scroll_count})...")
 
             logger.info(f"NOT FOUND: Article {target_article} not in top {position} positions")
@@ -628,7 +459,6 @@ class OzonParser:
             return None
 
         finally:
-            # Only close page if we created it ourselves
             if not page_provided:
                 await page.close()
 
@@ -637,17 +467,12 @@ class OzonParser:
         page = await self._new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")
-
-            # Wait for initial load
             await page.wait_for_timeout(3000)
 
-            # Check for captcha and wait if needed
             if await self._is_captcha_page(page):
                 await self._wait_for_captcha(page)
                 await page.wait_for_timeout(2000)
 
-            # After captcha, we might be on a different page due to redirect
-            # Try to find product elements
             try:
                 await page.wait_for_selector("h1", timeout=15000)
             except Exception:
@@ -657,30 +482,25 @@ class OzonParser:
             title = await title_el.inner_text() if title_el else "Unknown"
 
             price: Decimal | None = None
-            original_price: Decimal | None = None
-
-            price_selectors = [
+            for selector in [
                 "[data-widget='webPrice'] span",
                 "[data-widget='webSale'] span",
                 "span[class*='price']",
                 "span[class*='Price']",
-            ]
-            for selector in price_selectors:
+            ]:
                 price_el = await page.query_selector(selector)
                 if price_el:
-                    price_text = await price_el.inner_text()
-                    price = self._parse_price(price_text)
+                    price = self._parse_price(await price_el.inner_text())
                     if price:
                         break
 
             rating: float | None = None
             reviews_count: int | None = None
-            rating_selectors = [
+            for selector in [
                 "[data-widget='webSingleProductScore']",
                 "[data-widget='webReviewProductScore']",
                 "div[class*='rating']",
-            ]
-            for selector in rating_selectors:
+            ]:
                 rating_el = await page.query_selector(selector)
                 if rating_el:
                     rating_text = await rating_el.inner_text()
@@ -690,31 +510,28 @@ class OzonParser:
                         break
 
             seller: str | None = None
-            seller_selectors = [
+            for selector in [
                 "[data-widget='webCurrentSeller'] a",
                 "[data-widget='webSeller'] a",
                 "a[href*='/seller/']",
-            ]
-            for selector in seller_selectors:
+            ]:
                 seller_el = await page.query_selector(selector)
                 if seller_el:
-                    seller = await seller_el.inner_text()
+                    seller = (await seller_el.inner_text()).strip()
                     if seller:
-                        seller = seller.strip()
                         break
 
             out_of_stock_el = await page.query_selector("[data-widget='webOutOfStock']")
-            in_stock = out_of_stock_el is None
 
             product = Product(
                 url=page.url,
                 title=title.strip(),
                 price=price,
-                original_price=original_price,
+                original_price=None,
                 rating=rating,
                 reviews_count=reviews_count,
                 seller=seller,
-                in_stock=in_stock,
+                in_stock=out_of_stock_el is None,
             )
             logger.info(f"Successfully parsed: {product.title[:50]}...")
             return product

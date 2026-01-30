@@ -1,4 +1,5 @@
 import asyncio
+import random
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -185,12 +186,17 @@ class PositionTracker:
 
         # Create a single page for all requests (reuse for performance)
         page = await self.parser._new_page()
+        await self.parser._warmup(page)
 
         # Track pending write tasks
         write_tasks: list[asyncio.Task] = []
 
         try:
             for i, task in enumerate(tasks, 1):
+                # Delay between requests to avoid antibot detection
+                if i > 1:
+                    await asyncio.sleep(random.uniform(2, 5))
+
                 logger.info(f"[{i}/{len(tasks)}] Article: {task.article}, Query: {task.query}")
 
                 # Reuse the same page for all requests
