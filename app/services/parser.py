@@ -361,7 +361,8 @@ class OzonParser:
 
     async def _handle_block_page(self, page: Page, max_retries: int = 3) -> bool:
         """
-        Handle 'Доступ ограничен' block page by clicking 'Обновить'.
+        Handle 'Доступ ограничен' block page.
+        First waits for JS challenge to resolve automatically, then retries.
         Returns True if successfully bypassed, False otherwise.
         """
         # Save debug info on first detection
@@ -379,6 +380,16 @@ class OzonParser:
         except Exception as e:
             logger.warning(f"Failed to save debug info: {e}")
 
+        # First, wait for JS challenge to resolve automatically (up to 30s)
+        logger.info("Waiting for JS antibot challenge to resolve...")
+        for i in range(15):
+            await page.wait_for_timeout(2000)
+            if not await self._is_blocked_page(page):
+                logger.info(f"JS challenge resolved after {(i + 1) * 2}s")
+                return True
+            logger.debug(f"Still blocked, waiting... ({(i + 1) * 2}s)")
+
+        # If challenge didn't resolve, try refresh
         for attempt in range(max_retries):
             if not await self._is_blocked_page(page):
                 return True
