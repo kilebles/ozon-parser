@@ -212,6 +212,8 @@ class PositionTracker:
                     await page.close()
                     await self.parser.restart_browser()
                     page = await self.parser._new_page()
+                    await self.parser._warmup(page)
+                    await asyncio.sleep(random.uniform(5, 10))
                     # Retry the same query after restart
                     try:
                         position = await self.parser.find_product_position(
