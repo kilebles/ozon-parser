@@ -1,8 +1,8 @@
 import asyncio
-import fcntl
 import sys
 from datetime import datetime
-from pathlib import Path
+
+from apscheduler.schedulers.blocking import BlockingScheduler
 
 from app.logging_config import setup_logging, get_logger
 from app.services import GoogleSheetsService, OzonBlockedError
@@ -12,8 +12,6 @@ from app.services.position_tracker import PositionTracker
 from app.settings import settings
 
 logger = get_logger(__name__)
-
-LOCK_FILE = Path("/tmp/ozon-parser.lock")
 
 
 def create_captcha_solver() -> RuCaptchaSolver | None:
@@ -31,9 +29,7 @@ def create_captcha_solver() -> RuCaptchaSolver | None:
         return None
 
 
-async def main() -> None:
-    setup_logging()
-
+async def run_tracker() -> None:
     logger.info("Starting Ozon Position Tracker...")
 
     sheets = GoogleSheetsService()
@@ -58,16 +54,26 @@ async def main() -> None:
         logger.error(f"Парсер остановлен: {e}")
 
 
-if __name__ == "__main__":
-    lock_fp = open(LOCK_FILE, "w")
-    try:
-        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print("Another instance is already running, exiting.")
-        sys.exit(0)
+def job() -> None:
+    """Wrapper to run async tracker from sync scheduler."""
+    asyncio.run(run_tracker())
 
-    try:
-        asyncio.run(main())
-    finally:
-        fcntl.flock(lock_fp, fcntl.LOCK_UN)
-        lock_fp.close()
+
+if __name__ == "__main__":
+    setup_logging()
+
+    # Run once immediately on start
+    if "--once" in sys.argv:
+        job()
+    else:
+        logger.info("Starting scheduler (every 2 hours)")
+        # Run immediately, then every 2 hours
+        job()
+
+        scheduler = BlockingScheduler()
+        scheduler.add_job(job, "interval", hours=2, max_instances=1)
+
+        try:
+            scheduler.start()
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Scheduler stopped")
