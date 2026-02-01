@@ -3,6 +3,7 @@ import sys
 from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from app.logging_config import setup_logging, get_logger
 from app.services import GoogleSheetsService, OzonBlockedError
@@ -66,12 +67,16 @@ if __name__ == "__main__":
     if "--once" in sys.argv:
         job()
     else:
-        logger.info("Starting scheduler (every 2 hours)")
-        # Run immediately, then every 2 hours
+        logger.info("Starting scheduler (every 2 hours: 01, 03, 05, ..., 23)")
+        # Run immediately, then at fixed hours
         job()
 
         scheduler = BlockingScheduler()
-        scheduler.add_job(job, "interval", hours=2, max_instances=1)
+        scheduler.add_job(
+            job,
+            CronTrigger(hour="1,3,5,7,9,11,13,15,17,19,21,23", minute=0),
+            max_instances=1,
+        )
 
         try:
             scheduler.start()

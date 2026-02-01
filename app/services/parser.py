@@ -454,6 +454,13 @@ class OzonParser:
                 if position % 300 == 0:
                     logger.info(f"Progress: checked {position} products (scroll #{scroll_count})...")
 
+            if position < max_position:
+                logger.warning(
+                    f"INCOMPLETE: Only checked {position}/{max_position} positions "
+                    f"(page ended prematurely)"
+                )
+                return -1
+
             logger.info(f"NOT FOUND: Article {target_article} not in top {position} positions")
             logger.info(f"Total scrolls: {scroll_count}")
             return None

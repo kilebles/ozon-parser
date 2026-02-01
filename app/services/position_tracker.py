@@ -199,22 +199,9 @@ class PositionTracker:
 
                 logger.info(f"[{i}/{len(tasks)}] Article: {task.article}, Query: {task.query}")
 
-                # Reuse the same page for all requests
-                try:
-                    position = await self.parser.find_product_position(
-                        query=task.query,
-                        target_article=task.article,
-                        max_position=max_position,
-                        page=page,
-                    )
-                except OzonBlockedError:
-                    logger.warning("Block detected - restarting browser and retrying query...")
-                    await page.close()
-                    await self.parser.restart_browser()
-                    page = await self.parser._new_page()
-                    await self.parser._warmup(page)
-                    await asyncio.sleep(random.uniform(5, 10))
-                    # Retry the same query after restart
+                # Reuse the same page for all requests, retry up to 2 times
+                position = None
+                for attempt in range(3):
                     try:
                         position = await self.parser.find_product_position(
                             query=task.query,
@@ -222,15 +209,34 @@ class PositionTracker:
                             max_position=max_position,
                             page=page,
                         )
+                    except OzonBlockedError:
+                        logger.warning("Block detected - restarting browser...")
+                        await page.close()
+                        await self.parser.restart_browser()
+                        page = await self.parser._new_page()
+                        await self.parser._warmup(page)
+                        await asyncio.sleep(random.uniform(5, 10))
+                        continue
                     except Exception as e:
-                        logger.error(f"Still failing after restart: {e}")
-                        position = None
-                except Exception as e:
-                    logger.error(f"Error processing query '{task.query}': {e}")
-                    position = None
+                        logger.error(f"Error processing query '{task.query}': {e}")
+                        position = -1
+                        break
 
-                # Prepare result: position number or "1000+" if not found
-                result = str(position) if position else f"{max_position}+"
+                    # -1 means page ended prematurely — retry
+                    if position == -1 and attempt < 2:
+                        logger.warning(f"Incomplete results, retrying (attempt {attempt + 2}/3)...")
+                        await asyncio.sleep(random.uniform(3, 6))
+                        continue
+
+                    break
+
+                # Prepare result
+                if position is not None and position > 0:
+                    result = str(position)
+                elif position is None:
+                    result = f"{max_position}+"  # checked all 1000, not found
+                else:
+                    result = "—"  # incomplete or error
                 logger.info(f"Position: {result}")
 
                 # Write to sheet asynchronously (don't wait for completion)
