@@ -2,11 +2,14 @@ import asyncio
 import random
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from playwright.async_api import Page
 
 from app.logging_config import get_logger
 from app.services.parser import OzonParser, OzonBlockedError
 from app.services.sheets import GoogleSheetsService
+from app.services.telegram import get_telegram_notifier
 
 logger = get_logger(__name__)
 
@@ -26,6 +29,24 @@ class PositionTracker:
     ) -> None:
         self.sheets = sheets_service
         self.parser = parser
+        self.telegram = get_telegram_notifier()
+
+    async def _notify_error(
+        self, message: str, page: Page | None = None
+    ) -> None:
+        """Send error notification to Telegram with optional screenshot."""
+        if not self.telegram.enabled:
+            return
+
+        if page:
+            try:
+                screenshot = await page.screenshot()
+                await self.telegram.send_photo(screenshot, f"<b>Ошибка</b>\n{message}")
+                return
+            except Exception as e:
+                logger.debug(f"Failed to take screenshot: {e}")
+
+        await self.telegram.send_message(f"<b>Ошибка</b>\n{message}")
 
     def get_tasks_from_sheet(self) -> list[SearchTask]:
         """Parse the sheet and return list of search tasks."""
@@ -82,14 +103,17 @@ class PositionTracker:
         logger.info(f"Inserted new column '{column_name}' at position D")
         return 4
 
-    def _get_today_hourly_columns(self, headers: list[str]) -> list[int]:
+    def _get_hourly_columns_for_date(self, headers: list[str], date_str: str) -> list[int]:
         """
-        Find all hourly columns for today.
+        Find all hourly columns for a specific date.
         Returns list of 1-based column indices.
+
+        Args:
+            headers: List of column headers
+            date_str: Date in format "DD.MM" (e.g., "03.02")
         """
-        today = datetime.now().strftime("%d.%m")
         # Pattern: "28.01 14:00" (date with hour)
-        pattern = re.compile(rf"^{re.escape(today)} \d{{2}}:00$")
+        pattern = re.compile(rf"^{re.escape(date_str)} \d{{2}}:00$")
 
         columns = []
         for i, header in enumerate(headers):
@@ -98,25 +122,40 @@ class PositionTracker:
 
         return columns
 
-    def consolidate_daily_results(self, worksheet) -> None:
+    def consolidate_daily_results(self, worksheet, date_str: str | None = None) -> bool:
         """
         Consolidate hourly columns into daily average.
-        Called at end of day (after 23:00 run).
 
-        1. Find all hourly columns for today (e.g., "28.01 14:00", "28.01 15:00")
+        1. Find all hourly columns for the date (e.g., "28.01 14:00", "28.01 15:00")
         2. Calculate average position for each row
         3. Replace all hourly columns with single daily column ("28.01")
+
+        Args:
+            worksheet: Google Sheets worksheet
+            date_str: Date to consolidate in "DD.MM" format. If None, uses today.
+
+        Returns:
+            True if consolidation was performed, False otherwise.
         """
         headers = worksheet.row_values(1)
-        today = datetime.now().strftime("%d.%m")
 
-        hourly_columns = self._get_today_hourly_columns(headers)
+        if date_str is None:
+            date_str = datetime.now().strftime("%d.%m")
 
-        if len(hourly_columns) < 2:
-            logger.info("Less than 2 hourly columns found, skipping consolidation")
-            return
+        hourly_columns = self._get_hourly_columns_for_date(headers, date_str)
 
-        logger.info(f"Consolidating {len(hourly_columns)} hourly columns into daily average")
+        if len(hourly_columns) < 1:
+            logger.info(f"No hourly columns found for {date_str}, skipping consolidation")
+            return False
+
+        if len(hourly_columns) == 1:
+            # Only one hourly column - just rename it to date without time
+            col_idx = hourly_columns[0]
+            worksheet.update_cell(1, col_idx, date_str)
+            logger.info(f"Renamed single hourly column to '{date_str}'")
+            return True
+
+        logger.info(f"Consolidating {len(hourly_columns)} hourly columns for {date_str} into daily average")
 
         # Get all data
         all_data = worksheet.get_all_values()
@@ -149,18 +188,35 @@ class PositionTracker:
             else:
                 averages.append("")
 
+        # Find leftmost hourly column position for inserting the daily column
+        insert_position = min(hourly_columns)
+
         # Delete hourly columns (from right to left to preserve indices)
         hourly_columns_sorted = sorted(hourly_columns, reverse=True)
         for col_idx in hourly_columns_sorted:
             worksheet.delete_columns(col_idx)
             logger.debug(f"Deleted column {col_idx}")
 
-        # Insert new daily column at position D with header and all averages
+        # Insert new daily column at the position where first hourly column was
         # Prepare column data: header + averages
-        column_data = [[today]] + [[avg] for avg in averages]
-        worksheet.insert_cols(column_data, col=4)
+        column_data = [[date_str]] + [[avg] for avg in averages]
+        worksheet.insert_cols(column_data, col=insert_position)
 
-        logger.info(f"Consolidated into daily column '{today}' with averages")
+        logger.info(f"Consolidated into daily column '{date_str}' with averages")
+        return True
+
+    def consolidate_yesterday(self) -> bool:
+        """
+        Consolidate yesterday's hourly columns into a single daily column.
+        Called by scheduler at 12:00.
+
+        Returns:
+            True if consolidation was performed, False otherwise.
+        """
+        worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%d.%m")
+        logger.info(f"Running daily consolidation for yesterday ({yesterday})")
+        return self.consolidate_daily_results(worksheet, yesterday)
 
     async def _write_cell_async(self, worksheet, row: int, col: int, value: str) -> None:
         """Write to cell asynchronously without blocking."""
@@ -211,6 +267,9 @@ class PositionTracker:
                         )
                     except OzonBlockedError:
                         logger.warning("Block detected - restarting browser...")
+                        await self._notify_error(
+                            f"Блокировка Ozon при поиске '{task.query}'", page
+                        )
                         await page.close()
                         await self.parser.restart_browser()
                         page = await self.parser._new_page()
@@ -218,7 +277,21 @@ class PositionTracker:
                         await asyncio.sleep(random.uniform(5, 10))
                         continue
                     except Exception as e:
+                        error_str = str(e)
+                        # Handle timeout errors by restarting browser
+                        if "ERR_TIMED_OUT" in error_str or "Timeout" in error_str:
+                            logger.warning(f"Timeout error, restarting browser (attempt {attempt + 1}/3): {e}")
+                            await self._notify_error(
+                                f"Таймаут при поиске '{task.query}' (попытка {attempt + 1}/3)", page
+                            )
+                            await page.close()
+                            await self.parser.restart_browser()
+                            page = await self.parser._new_page()
+                            await self.parser._warmup(page)
+                            await asyncio.sleep(random.uniform(5, 10))
+                            continue
                         logger.error(f"Error processing query '{task.query}': {e}")
+                        await self._notify_error(f"Ошибка при поиске '{task.query}': {e}", page)
                         position = -1
                         break
 

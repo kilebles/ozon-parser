@@ -27,5 +27,9 @@ class Settings(BaseSettings):
     ru_captcha_api_key: str = ""
     captcha_solve_timeout: int = 120  # Max seconds to wait for captcha solution
 
+    # Telegram notifications
+    bot_token: str = ""
+    telegram_chat_id: str = ""  # Will be auto-detected on first message
+
 
 settings = Settings()
