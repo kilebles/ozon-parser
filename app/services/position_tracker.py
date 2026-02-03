@@ -38,13 +38,27 @@ class PositionTracker:
         if not self.telegram.enabled:
             return
 
+        screenshot: bytes | None = None
         if page:
             try:
-                screenshot = await page.screenshot()
-                await self.telegram.send_photo(screenshot, f"<b>Ошибка</b>\n{message}")
-                return
+                logger.debug("Taking screenshot for error notification...")
+                screenshot = await asyncio.wait_for(
+                    page.screenshot(full_page=False, timeout=10000),
+                    timeout=15
+                )
+                logger.debug(f"Screenshot taken, size: {len(screenshot)} bytes")
+            except asyncio.TimeoutError:
+                logger.warning("Screenshot timed out")
             except Exception as e:
-                logger.debug(f"Failed to take screenshot: {e}")
+                logger.warning(f"Failed to take screenshot: {e}")
+
+        if screenshot:
+            logger.debug("Sending screenshot to Telegram...")
+            sent = await self.telegram.send_photo(screenshot, f"<b>Ошибка</b>\n{message}")
+            if sent:
+                logger.debug("Screenshot sent successfully")
+                return
+            logger.warning("Failed to send screenshot to Telegram, sending text only")
 
         await self.telegram.send_message(f"<b>Ошибка</b>\n{message}")
 
