@@ -29,7 +29,6 @@ class Settings(BaseSettings):
 
     # Telegram notifications
     bot_token: str = ""
-    telegram_chat_id: str = ""  # Will be auto-detected on first message
 
 
 settings = Settings()

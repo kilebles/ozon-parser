@@ -33,6 +33,7 @@ def create_captcha_solver() -> RuCaptchaSolver | None:
 
 async def run_tracker() -> None:
     logger.info("Starting Ozon Position Tracker...")
+    await telegram.send_message("Запуск трекинга позиций...")
 
     sheets = GoogleSheetsService()
     sheets.connect()
