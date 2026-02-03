@@ -30,5 +30,8 @@ class Settings(BaseSettings):
     # Telegram notifications
     bot_token: str = ""
 
+    # Proxy list (comma-separated, format: user:pass@host:port)
+    proxy_list: str = ""
+
 
 settings = Settings()

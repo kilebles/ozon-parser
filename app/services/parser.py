@@ -34,12 +34,46 @@ class OzonParser:
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
         self._captcha_solver = captcha_solver
+        self._proxies: list[str] = self._parse_proxies()
+        self._current_proxy_idx: int = 0
+
+    def _parse_proxies(self) -> list[str]:
+        """Parse proxy list from settings."""
+        if not settings.proxy_list:
+            return []
+        proxies = [p.strip() for p in settings.proxy_list.split(",") if p.strip()]
+        logger.info(f"Loaded {len(proxies)} proxies")
+        return proxies
+
+    def _get_next_proxy(self) -> dict | None:
+        """Get next proxy in rotation."""
+        if not self._proxies:
+            return None
+
+        proxy_str = self._proxies[self._current_proxy_idx]
+        self._current_proxy_idx = (self._current_proxy_idx + 1) % len(self._proxies)
+
+        # Parse user:pass@host:port
+        if "@" in proxy_str:
+            auth, server = proxy_str.rsplit("@", 1)
+            username, password = auth.split(":", 1)
+            host, port = server.rsplit(":", 1)
+            proxy = {
+                "server": f"http://{host}:{port}",
+                "username": username,
+                "password": password,
+            }
+        else:
+            proxy = {"server": f"http://{proxy_str}"}
+
+        logger.info(f"Using proxy: {proxy['server']}")
+        return proxy
 
     def _build_launch_options(self) -> dict:
         user_data_dir = Path("browser_data")
         user_data_dir.mkdir(exist_ok=True)
 
-        return dict(
+        options = dict(
             user_data_dir=str(user_data_dir),
             headless=settings.browser_headless,
             args=[
@@ -58,6 +92,12 @@ class OzonParser:
             viewport={"width": 1920, "height": 1080},
             locale="ru-RU",
         )
+
+        proxy = self._get_next_proxy()
+        if proxy:
+            options["proxy"] = proxy
+
+        return options
 
     async def __aenter__(self) -> "OzonParser":
         self._playwright = await async_playwright().start()
