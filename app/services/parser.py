@@ -440,33 +440,42 @@ class OzonParser:
 
             # Scroll and load more products
             no_new_products_count = 0
-            max_no_new_products = 5
+            max_no_new_products = 8  # Increased for slow proxies
 
             while position < max_position:
                 scroll_count += 1
 
+                prev_product_count = len(seen_products)
                 prev_height = await page.evaluate("document.body.scrollHeight")
 
                 await page.mouse.wheel(0, random.randint(2000, 5000))
-                await page.wait_for_timeout(200)
+                await page.wait_for_timeout(300)
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
 
-                # Wait for page height to grow (means new content loaded)
-                try:
-                    await page.wait_for_function(
-                        f"document.body.scrollHeight > {prev_height}",
-                        timeout=settings.scroll_networkidle_timeout,
-                    )
-                except Exception:
-                    pass  # timeout — page didn't grow, maybe at the bottom
+                # Dynamic wait: wait for new products to appear (not just page height)
+                for wait_attempt in range(10):  # Up to 10 seconds
+                    await page.wait_for_timeout(1000)
 
-                if await self._is_captcha_page(page):
-                    await self._wait_for_captcha(page)
-                    await page.wait_for_timeout(2000)
+                    # Check for captcha/block during wait
+                    if await self._is_captcha_page(page):
+                        await self._wait_for_captcha(page)
+                        await page.wait_for_timeout(2000)
 
-                if await self._is_blocked_page(page):
-                    if not await self._handle_block_page(page):
-                        logger.error("Failed to bypass block page during scroll")
+                    if await self._is_blocked_page(page):
+                        if not await self._handle_block_page(page):
+                            logger.error("Failed to bypass block page during scroll")
+                            return -1
+
+                    # Check if new products appeared
+                    current_products = await self._collect_products_from_page(page, set(seen_products))
+                    if current_products:
+                        logger.debug(f"New products loaded after {wait_attempt + 1}s wait")
+                        break
+
+                    # Check if page height changed (might still be loading)
+                    current_height = await page.evaluate("document.body.scrollHeight")
+                    if current_height == prev_height and wait_attempt >= 2:
+                        # Page stopped growing, probably at the end
                         break
 
                 new_products = await self._collect_products_from_page(page, seen_products)

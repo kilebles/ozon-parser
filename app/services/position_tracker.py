@@ -338,11 +338,24 @@ class PositionTracker:
                         position = -1
                         break
 
-                    # -1 means page ended prematurely — retry
-                    if position == -1 and attempt < 2:
-                        logger.warning(f"Incomplete results, retrying (attempt {attempt + 2}/3)...")
-                        await asyncio.sleep(random.uniform(3, 6))
-                        continue
+                    # -1 means page ended prematurely — retry with notification
+                    if position == -1:
+                        if attempt < 2:
+                            logger.warning(f"Incomplete results, retrying (attempt {attempt + 2}/3)...")
+                            await self._notify_error(
+                                f"Неполные результаты для '{task.query}' (попытка {attempt + 2}/3)", page
+                            )
+                            await page.close()
+                            await self.parser.restart_browser()
+                            page = await self.parser._new_page()
+                            await self.parser._warmup(page)
+                            await asyncio.sleep(random.uniform(3, 6))
+                            continue
+                        else:
+                            # All retries exhausted
+                            await self._notify_error(
+                                f"Не удалось получить полные результаты для '{task.query}'", page
+                            )
 
                     break
 
