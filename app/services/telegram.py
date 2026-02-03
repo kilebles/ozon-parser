@@ -73,7 +73,11 @@ class TelegramNotifier:
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
                     f"{self._base_url}/sendPhoto",
-                    data={"chat_id": chat_id, "caption": caption or ""},
+                    data={
+                        "chat_id": chat_id,
+                        "caption": caption or "",
+                        "parse_mode": "HTML",
+                    },
                     files={"photo": ("screenshot.png", photo, "image/png")},
                 )
                 return response.status_code == 200
