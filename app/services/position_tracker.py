@@ -31,6 +31,29 @@ class PositionTracker:
         self.parser = parser
         self.telegram = get_telegram_notifier()
 
+    async def _take_screenshot(self, page: Page) -> bytes | None:
+        """Take screenshot with fallback methods."""
+        # Method 1: standard screenshot with disabled animations
+        try:
+            return await page.screenshot(
+                timeout=3000,
+                animations="disabled",
+            )
+        except Exception as e:
+            logger.debug(f"Standard screenshot failed: {e}")
+
+        # Method 2: CDP screenshot (bypasses some issues)
+        try:
+            cdp = await page.context.new_cdp_session(page)
+            result = await cdp.send("Page.captureScreenshot", {"format": "png"})
+            await cdp.detach()
+            import base64
+            return base64.b64decode(result["data"])
+        except Exception as e:
+            logger.debug(f"CDP screenshot failed: {e}")
+
+        return None
+
     async def _notify_error(
         self, message: str, page: Page | None = None
     ) -> None:
@@ -40,17 +63,12 @@ class PositionTracker:
 
         screenshot: bytes | None = None
         if page:
-            try:
-                logger.debug("Taking screenshot for error notification...")
-                # Disable animations and use short timeout - page may be stuck
-                screenshot = await page.screenshot(
-                    full_page=False,
-                    timeout=5000,
-                    animations="disabled",
-                )
+            logger.debug("Taking screenshot for error notification...")
+            screenshot = await self._take_screenshot(page)
+            if screenshot:
                 logger.debug(f"Screenshot taken, size: {len(screenshot)} bytes")
-            except Exception as e:
-                logger.warning(f"Failed to take screenshot: {e}")
+            else:
+                logger.warning("All screenshot methods failed")
 
         if screenshot:
             logger.debug("Sending screenshot to Telegram...")
