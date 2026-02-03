@@ -42,13 +42,13 @@ class PositionTracker:
         if page:
             try:
                 logger.debug("Taking screenshot for error notification...")
-                screenshot = await asyncio.wait_for(
-                    page.screenshot(full_page=False, timeout=10000),
-                    timeout=15
+                # Disable animations and use short timeout - page may be stuck
+                screenshot = await page.screenshot(
+                    full_page=False,
+                    timeout=5000,
+                    animations="disabled",
                 )
                 logger.debug(f"Screenshot taken, size: {len(screenshot)} bytes")
-            except asyncio.TimeoutError:
-                logger.warning("Screenshot timed out")
             except Exception as e:
                 logger.warning(f"Failed to take screenshot: {e}")
 
