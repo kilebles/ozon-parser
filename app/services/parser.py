@@ -1,3 +1,4 @@
+import asyncio
 import platform
 import random
 import re
@@ -36,6 +37,13 @@ class OzonParser:
         self._captcha_solver = captcha_solver
         self._proxies: list[str] = self._parse_proxies()
         self._current_proxy_idx: int = 0
+        self._restart_lock: asyncio.Lock | None = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Get or create restart lock."""
+        if self._restart_lock is None:
+            self._restart_lock = asyncio.Lock()
+        return self._restart_lock
 
     def _parse_proxies(self) -> list[str]:
         """Parse proxy list from settings."""
@@ -113,23 +121,36 @@ class OzonParser:
             await self._playwright.stop()
 
     async def restart_browser(self) -> None:
-        """Close browser, wipe browser_data, and relaunch with clean profile."""
-        logger.info("Restarting browser with clean profile...")
-        if self._context:
-            await self._context.close()
-            self._context = None
+        """Close browser, wipe browser_data, and relaunch with clean profile.
 
-        browser_data = Path("browser_data")
-        if browser_data.exists():
-            shutil.rmtree(browser_data)
-            logger.info("Deleted browser_data/")
+        Thread-safe: uses lock to prevent concurrent restarts.
+        """
+        lock = self._get_lock()
 
-        if not self._playwright:
-            self._playwright = await async_playwright().start()
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            **self._build_launch_options()
-        )
-        logger.info("Browser restarted with clean profile")
+        async with lock:
+            logger.info("Restarting browser with clean profile...")
+            if self._context:
+                try:
+                    await self._context.close()
+                except Exception as e:
+                    logger.debug(f"Context close error (may be already closed): {e}")
+                self._context = None
+
+            browser_data = Path("browser_data")
+            if browser_data.exists():
+                try:
+                    shutil.rmtree(browser_data)
+                    logger.info("Deleted browser_data/")
+                except Exception as e:
+                    logger.warning(f"Failed to delete browser_data: {e}")
+
+            if not self._playwright:
+                self._playwright = await async_playwright().start()
+
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                **self._build_launch_options()
+            )
+            logger.info("Browser restarted with clean profile")
 
     async def _new_page(self) -> Page:
         if not self._context:

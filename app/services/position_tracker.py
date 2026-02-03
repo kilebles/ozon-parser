@@ -259,6 +259,26 @@ class PositionTracker:
         except Exception as e:
             logger.error(f"Failed to write to cell ({row}, {col}): {e}")
 
+    async def _safe_close_page(self, page: Page) -> None:
+        """Safely close page, ignoring errors if already closed."""
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+    async def _get_fresh_page(self, worker_id: int) -> Page:
+        """Get a fresh page, handling browser restarts if needed."""
+        try:
+            page = await self.parser._new_page()
+            await self.parser._warmup(page)
+            return page
+        except Exception as e:
+            logger.warning(f"[Worker {worker_id}] Failed to create page, restarting browser: {e}")
+            await self.parser.restart_browser()
+            page = await self.parser._new_page()
+            await self.parser._warmup(page)
+            return page
+
     async def _process_single_task(
         self,
         task: SearchTask,
@@ -281,14 +301,12 @@ class PositionTracker:
                     page=page,
                 )
             except OzonBlockedError:
-                logger.warning(f"[Worker {worker_id}] Block detected - restarting browser...")
+                logger.warning(f"[Worker {worker_id}] Block detected")
                 await self._notify_error(
                     f"[W{worker_id}] Блокировка Ozon при поиске '{task.query}'", page
                 )
-                await page.close()
-                await self.parser.restart_browser()
-                page = await self.parser._new_page()
-                await self.parser._warmup(page)
+                await self._safe_close_page(page)
+                page = await self._get_fresh_page(worker_id)
                 await asyncio.sleep(random.uniform(5, 10))
                 continue
             except OzonPageLoadError as e:
@@ -296,24 +314,26 @@ class PositionTracker:
                 await self._notify_error(
                     f"[W{worker_id}] Ошибка загрузки '{task.query}' (попытка {attempt + 1}/3)", page
                 )
-                await page.close()
-                await self.parser.restart_browser()
-                page = await self.parser._new_page()
-                await self.parser._warmup(page)
-                await asyncio.sleep(random.uniform(5, 10))
+                await self._safe_close_page(page)
+                page = await self._get_fresh_page(worker_id)
+                await asyncio.sleep(random.uniform(3, 6))
                 continue
             except Exception as e:
                 error_str = str(e)
+                # Browser/context closed - get fresh page
+                if "closed" in error_str.lower() or "target" in error_str.lower():
+                    logger.warning(f"[Worker {worker_id}] Browser closed, getting fresh page")
+                    page = await self._get_fresh_page(worker_id)
+                    await asyncio.sleep(random.uniform(2, 4))
+                    continue
                 if "ERR_TIMED_OUT" in error_str or "Timeout" in error_str:
                     logger.warning(f"[Worker {worker_id}] Timeout error (attempt {attempt + 1}/3): {e}")
                     await self._notify_error(
                         f"[W{worker_id}] Таймаут '{task.query}' (попытка {attempt + 1}/3)", page
                     )
-                    await page.close()
-                    await self.parser.restart_browser()
-                    page = await self.parser._new_page()
-                    await self.parser._warmup(page)
-                    await asyncio.sleep(random.uniform(5, 10))
+                    await self._safe_close_page(page)
+                    page = await self._get_fresh_page(worker_id)
+                    await asyncio.sleep(random.uniform(3, 6))
                     continue
                 logger.error(f"[Worker {worker_id}] Error processing query '{task.query}': {e}")
                 await self._notify_error(f"[W{worker_id}] Ошибка '{task.query}': {e}", page)
@@ -326,10 +346,8 @@ class PositionTracker:
                     await self._notify_error(
                         f"[W{worker_id}] Неполные результаты '{task.query}' (попытка {attempt + 2}/3)", page
                     )
-                    await page.close()
-                    await self.parser.restart_browser()
-                    page = await self.parser._new_page()
-                    await self.parser._warmup(page)
+                    await self._safe_close_page(page)
+                    page = await self._get_fresh_page(worker_id)
                     await asyncio.sleep(random.uniform(3, 6))
                     continue
                 else:
@@ -359,8 +377,7 @@ class PositionTracker:
         results: list,
     ) -> None:
         """Worker that processes tasks from queue."""
-        page = await self.parser._new_page()
-        await self.parser._warmup(page)
+        page = await self._get_fresh_page(worker_id)
 
         try:
             while True:
@@ -373,9 +390,20 @@ class PositionTracker:
                 if task_num > 1:
                     await asyncio.sleep(random.uniform(1, 3))
 
-                task, result, page = await self._process_single_task(
-                    task, task_num, total_tasks, max_position, page, worker_id
-                )
+                try:
+                    task, result, page = await self._process_single_task(
+                        task, task_num, total_tasks, max_position, page, worker_id
+                    )
+                except Exception as e:
+                    logger.error(f"[Worker {worker_id}] Fatal error: {e}")
+                    result = "—"
+                    # Try to get fresh page for next task
+                    try:
+                        page = await self._get_fresh_page(worker_id)
+                    except Exception:
+                        logger.error(f"[Worker {worker_id}] Cannot recover, stopping")
+                        task_queue.task_done()
+                        break
 
                 results.append((task, result))
 
@@ -384,7 +412,7 @@ class PositionTracker:
 
                 task_queue.task_done()
         finally:
-            await page.close()
+            await self._safe_close_page(page)
 
     async def run(self, max_position: int = 1000) -> None:
         """Run position tracking for all tasks with parallel workers."""
