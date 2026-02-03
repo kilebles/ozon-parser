@@ -24,6 +24,11 @@ class OzonBlockedError(Exception):
     pass
 
 
+class OzonPageLoadError(Exception):
+    """Raised when page fails to load (timeout, network error)."""
+    pass
+
+
 class OzonParser:
     def __init__(self, captcha_solver: RuCaptchaSolver | None = None) -> None:
         self._playwright: Playwright | None = None
@@ -349,16 +354,16 @@ class OzonParser:
             try:
                 await page.goto(search_url, wait_until="domcontentloaded")
             except Exception as e:
-                if "Timeout" in str(e):
+                if "Timeout" in str(e) or "ERR_TIMED_OUT" in str(e):
                     logger.warning("Page load timeout, waiting for products...")
                     try:
-                        await page.wait_for_selector("a[href*='/product/']", timeout=60000)
+                        await page.wait_for_selector("a[href*='/product/']", timeout=30000)
                         logger.info("Products loaded after extended wait")
                     except Exception:
-                        logger.error("Products did not load within 60s")
-                        raise
+                        logger.error("Products did not load - page timeout")
+                        raise OzonPageLoadError(f"Page load timeout for query: {query}")
                 else:
-                    raise
+                    raise OzonPageLoadError(f"Page load error: {e}")
 
             # Wait for products to load
             try:
@@ -366,6 +371,7 @@ class OzonParser:
                 logger.debug("Products loaded on page")
             except Exception:
                 logger.warning("Timeout waiting for products to appear")
+                raise OzonPageLoadError(f"No products found for query: {query}")
 
             # Wait for network to settle
             try:

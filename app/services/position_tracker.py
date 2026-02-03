@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from playwright.async_api import Page
 
 from app.logging_config import get_logger
-from app.services.parser import OzonParser, OzonBlockedError
+from app.services.parser import OzonParser, OzonBlockedError, OzonPageLoadError
 from app.services.sheets import GoogleSheetsService
 from app.services.telegram import get_telegram_notifier
 
@@ -269,6 +269,17 @@ class PositionTracker:
                         logger.warning("Block detected - restarting browser...")
                         await self._notify_error(
                             f"Блокировка Ozon при поиске '{task.query}'", page
+                        )
+                        await page.close()
+                        await self.parser.restart_browser()
+                        page = await self.parser._new_page()
+                        await self.parser._warmup(page)
+                        await asyncio.sleep(random.uniform(5, 10))
+                        continue
+                    except OzonPageLoadError as e:
+                        logger.warning(f"Page load error (attempt {attempt + 1}/3): {e}")
+                        await self._notify_error(
+                            f"Ошибка загрузки страницы '{task.query}' (попытка {attempt + 1}/3)", page
                         )
                         await page.close()
                         await self.parser.restart_browser()
