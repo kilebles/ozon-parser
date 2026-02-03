@@ -10,6 +10,7 @@ from app.logging_config import get_logger
 from app.services.parser import OzonParser, OzonBlockedError, OzonPageLoadError
 from app.services.sheets import GoogleSheetsService
 from app.services.telegram import get_telegram_notifier
+from app.settings import settings
 
 logger = get_logger(__name__)
 
@@ -258,8 +259,135 @@ class PositionTracker:
         except Exception as e:
             logger.error(f"Failed to write to cell ({row}, {col}): {e}")
 
+    async def _process_single_task(
+        self,
+        task: SearchTask,
+        task_num: int,
+        total_tasks: int,
+        max_position: int,
+        page: Page,
+        worker_id: int,
+    ) -> tuple[SearchTask, str, Page]:
+        """Process a single search task. Returns (task, result, page)."""
+        logger.info(f"[Worker {worker_id}] [{task_num}/{total_tasks}] Article: {task.article}, Query: {task.query}")
+
+        position = None
+        for attempt in range(3):
+            try:
+                position = await self.parser.find_product_position(
+                    query=task.query,
+                    target_article=task.article,
+                    max_position=max_position,
+                    page=page,
+                )
+            except OzonBlockedError:
+                logger.warning(f"[Worker {worker_id}] Block detected - restarting browser...")
+                await self._notify_error(
+                    f"[W{worker_id}] Блокировка Ozon при поиске '{task.query}'", page
+                )
+                await page.close()
+                await self.parser.restart_browser()
+                page = await self.parser._new_page()
+                await self.parser._warmup(page)
+                await asyncio.sleep(random.uniform(5, 10))
+                continue
+            except OzonPageLoadError as e:
+                logger.warning(f"[Worker {worker_id}] Page load error (attempt {attempt + 1}/3): {e}")
+                await self._notify_error(
+                    f"[W{worker_id}] Ошибка загрузки '{task.query}' (попытка {attempt + 1}/3)", page
+                )
+                await page.close()
+                await self.parser.restart_browser()
+                page = await self.parser._new_page()
+                await self.parser._warmup(page)
+                await asyncio.sleep(random.uniform(5, 10))
+                continue
+            except Exception as e:
+                error_str = str(e)
+                if "ERR_TIMED_OUT" in error_str or "Timeout" in error_str:
+                    logger.warning(f"[Worker {worker_id}] Timeout error (attempt {attempt + 1}/3): {e}")
+                    await self._notify_error(
+                        f"[W{worker_id}] Таймаут '{task.query}' (попытка {attempt + 1}/3)", page
+                    )
+                    await page.close()
+                    await self.parser.restart_browser()
+                    page = await self.parser._new_page()
+                    await self.parser._warmup(page)
+                    await asyncio.sleep(random.uniform(5, 10))
+                    continue
+                logger.error(f"[Worker {worker_id}] Error processing query '{task.query}': {e}")
+                await self._notify_error(f"[W{worker_id}] Ошибка '{task.query}': {e}", page)
+                position = -1
+                break
+
+            if position == -1:
+                if attempt < 2:
+                    logger.warning(f"[Worker {worker_id}] Incomplete results, retrying...")
+                    await self._notify_error(
+                        f"[W{worker_id}] Неполные результаты '{task.query}' (попытка {attempt + 2}/3)", page
+                    )
+                    await page.close()
+                    await self.parser.restart_browser()
+                    page = await self.parser._new_page()
+                    await self.parser._warmup(page)
+                    await asyncio.sleep(random.uniform(3, 6))
+                    continue
+                else:
+                    await self._notify_error(
+                        f"[W{worker_id}] Не удалось получить результаты '{task.query}'", page
+                    )
+            break
+
+        if position is not None and position > 0:
+            result = str(position)
+        elif position is None:
+            result = f"{max_position}+"
+        else:
+            result = "—"
+
+        logger.info(f"[Worker {worker_id}] Position for {task.article}: {result}")
+        return (task, result, page)
+
+    async def _worker(
+        self,
+        worker_id: int,
+        task_queue: asyncio.Queue,
+        total_tasks: int,
+        max_position: int,
+        worksheet,
+        col_idx: int,
+        results: list,
+    ) -> None:
+        """Worker that processes tasks from queue."""
+        page = await self.parser._new_page()
+        await self.parser._warmup(page)
+
+        try:
+            while True:
+                try:
+                    task_num, task = task_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+                # Random delay between tasks to look more human
+                if task_num > 1:
+                    await asyncio.sleep(random.uniform(1, 3))
+
+                task, result, page = await self._process_single_task(
+                    task, task_num, total_tasks, max_position, page, worker_id
+                )
+
+                results.append((task, result))
+
+                # Write result immediately
+                await self._write_cell_async(worksheet, task.row_index, col_idx, result)
+
+                task_queue.task_done()
+        finally:
+            await page.close()
+
     async def run(self, max_position: int = 1000) -> None:
-        """Run position tracking for all tasks and save results."""
+        """Run position tracking for all tasks with parallel workers."""
         worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
         tasks = self.get_tasks_from_sheet()
 
@@ -267,120 +395,32 @@ class PositionTracker:
             logger.warning("No tasks found")
             return
 
-        # Get or create column for current hour (e.g., "28.01 14:00")
         col_idx = self.get_or_create_hourly_column(worksheet)
+        num_workers = min(settings.parallel_tabs, len(tasks))
 
-        logger.info(f"Starting position tracking for {len(tasks)} queries (max position: {max_position})")
+        logger.info(
+            f"Starting position tracking: {len(tasks)} queries, "
+            f"{num_workers} parallel tabs, max position {max_position}"
+        )
 
-        # Create a single page for all requests (reuse for performance)
-        page = await self.parser._new_page()
-        await self.parser._warmup(page)
+        # Create task queue
+        task_queue: asyncio.Queue = asyncio.Queue()
+        for i, task in enumerate(tasks, 1):
+            await task_queue.put((i, task))
 
-        # Track pending write tasks
-        write_tasks: list[asyncio.Task] = []
+        results: list = []
 
-        try:
-            for i, task in enumerate(tasks, 1):
-                # Delay between requests to avoid antibot detection
-                if i > 1:
-                    await asyncio.sleep(random.uniform(2, 5))
+        # Start workers with staggered delay
+        workers = []
+        for worker_id in range(num_workers):
+            if worker_id > 0:
+                await asyncio.sleep(random.uniform(2, 4))  # Stagger worker starts
+            worker = asyncio.create_task(
+                self._worker(worker_id, task_queue, len(tasks), max_position, worksheet, col_idx, results)
+            )
+            workers.append(worker)
 
-                logger.info(f"[{i}/{len(tasks)}] Article: {task.article}, Query: {task.query}")
+        # Wait for all workers to complete
+        await asyncio.gather(*workers)
 
-                # Reuse the same page for all requests, retry up to 2 times
-                position = None
-                for attempt in range(3):
-                    try:
-                        position = await self.parser.find_product_position(
-                            query=task.query,
-                            target_article=task.article,
-                            max_position=max_position,
-                            page=page,
-                        )
-                    except OzonBlockedError:
-                        logger.warning("Block detected - restarting browser...")
-                        await self._notify_error(
-                            f"Блокировка Ozon при поиске '{task.query}'", page
-                        )
-                        await page.close()
-                        await self.parser.restart_browser()
-                        page = await self.parser._new_page()
-                        await self.parser._warmup(page)
-                        await asyncio.sleep(random.uniform(5, 10))
-                        continue
-                    except OzonPageLoadError as e:
-                        logger.warning(f"Page load error (attempt {attempt + 1}/3): {e}")
-                        await self._notify_error(
-                            f"Ошибка загрузки страницы '{task.query}' (попытка {attempt + 1}/3)", page
-                        )
-                        await page.close()
-                        await self.parser.restart_browser()
-                        page = await self.parser._new_page()
-                        await self.parser._warmup(page)
-                        await asyncio.sleep(random.uniform(5, 10))
-                        continue
-                    except Exception as e:
-                        error_str = str(e)
-                        # Handle timeout errors by restarting browser
-                        if "ERR_TIMED_OUT" in error_str or "Timeout" in error_str:
-                            logger.warning(f"Timeout error, restarting browser (attempt {attempt + 1}/3): {e}")
-                            await self._notify_error(
-                                f"Таймаут при поиске '{task.query}' (попытка {attempt + 1}/3)", page
-                            )
-                            await page.close()
-                            await self.parser.restart_browser()
-                            page = await self.parser._new_page()
-                            await self.parser._warmup(page)
-                            await asyncio.sleep(random.uniform(5, 10))
-                            continue
-                        logger.error(f"Error processing query '{task.query}': {e}")
-                        await self._notify_error(f"Ошибка при поиске '{task.query}': {e}", page)
-                        position = -1
-                        break
-
-                    # -1 means page ended prematurely — retry with notification
-                    if position == -1:
-                        if attempt < 2:
-                            logger.warning(f"Incomplete results, retrying (attempt {attempt + 2}/3)...")
-                            await self._notify_error(
-                                f"Неполные результаты для '{task.query}' (попытка {attempt + 2}/3)", page
-                            )
-                            await page.close()
-                            await self.parser.restart_browser()
-                            page = await self.parser._new_page()
-                            await self.parser._warmup(page)
-                            await asyncio.sleep(random.uniform(3, 6))
-                            continue
-                        else:
-                            # All retries exhausted
-                            await self._notify_error(
-                                f"Не удалось получить полные результаты для '{task.query}'", page
-                            )
-
-                    break
-
-                # Prepare result
-                if position is not None and position > 0:
-                    result = str(position)
-                elif position is None:
-                    result = f"{max_position}+"  # checked all 1000, not found
-                else:
-                    result = "—"  # incomplete or error
-                logger.info(f"Position: {result}")
-
-                # Write to sheet asynchronously (don't wait for completion)
-                write_task = asyncio.create_task(
-                    self._write_cell_async(worksheet, task.row_index, col_idx, result)
-                )
-                write_tasks.append(write_task)
-        finally:
-            # Close the reused page
-            await page.close()
-
-        # Wait for all pending writes to complete
-        if write_tasks:
-            logger.info(f"Waiting for {len(write_tasks)} sheet writes to complete...")
-            await asyncio.gather(*write_tasks, return_exceptions=True)
-            logger.info("All writes completed")
-
-        logger.info("Position tracking completed")
+        logger.info(f"Position tracking completed: {len(results)}/{len(tasks)} tasks processed")

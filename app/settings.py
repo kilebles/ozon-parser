@@ -33,5 +33,8 @@ class Settings(BaseSettings):
     # Proxy list (comma-separated, format: user:pass@host:port)
     proxy_list: str = ""
 
+    # Parallel tabs for parsing (be careful, high values may trigger ban)
+    parallel_tabs: int = 1
+
 
 settings = Settings()
