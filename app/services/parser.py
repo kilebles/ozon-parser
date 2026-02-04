@@ -12,6 +12,7 @@ from playwright.async_api import (
     Playwright,
     BrowserContext,
 )
+from playwright_stealth import Stealth
 from app.logging_config import get_logger
 from app.schemas import Product
 from app.services.captcha import RuCaptchaSolver, CaptchaSolverError
@@ -178,50 +179,12 @@ class OzonParser:
         page = await self._context.new_page()
         page.set_default_timeout(settings.browser_timeout)
 
-        # Inject anti-detection scripts before any page load
-        await page.add_init_script("""
-            // Hide webdriver
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-
-            // Hide automation plugins
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [
-                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
-                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-                    { name: 'Native Client', filename: 'internal-nacl-plugin' }
-                ]
-            });
-
-            // Hide languages inconsistency
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['ru-RU', 'ru', 'en-US', 'en']
-            });
-
-            // Fix permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
-
-            // Hide chrome runtime
-            window.chrome = {
-                runtime: {},
-                loadTimes: function() {},
-                csi: function() {},
-                app: {}
-            };
-
-            // Fix iframe contentWindow
-            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
-                get: function() {
-                    return window;
-                }
-            });
-        """)
+        # Apply stealth mode (hides webdriver, fixes fingerprints, etc.)
+        stealth = Stealth(
+            navigator_languages_override=("ru-RU", "ru"),
+            navigator_platform_override="Linux x86_64" if platform.system() == "Linux" else "MacIntel",
+        )
+        await stealth.apply_stealth_async(page)
 
         return page
 

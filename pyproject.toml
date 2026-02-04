@@ -11,4 +11,5 @@ dependencies = [
     "google-auth>=2.47.0",
     "httpx>=0.28.1",
     "apscheduler>=3.11.2",
+    "playwright-stealth>=2.0.1",
 ]
