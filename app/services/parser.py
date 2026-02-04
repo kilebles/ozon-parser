@@ -82,29 +82,35 @@ class OzonParser:
         user_data_dir = Path("browser_data")
         user_data_dir.mkdir(exist_ok=True)
 
+        args = [
+            # Anti-detection
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-site-isolation-trials",
+            # Performance & stability
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            # Hide automation
+            "--disable-infobars",
+            "--disable-background-networking",
+            "--disable-breakpad",
+            "--disable-component-update",
+            "--no-first-run",
+            "--no-default-browser-check",
+            # Window size (not default 800x600)
+            "--window-size=1920,1080",
+            "--start-maximized",
+        ]
+
+        # Use new headless mode if enabled (less detectable)
+        if settings.browser_headless and settings.browser_headless_new:
+            args.append("--headless=new")
+
         options = dict(
             user_data_dir=str(user_data_dir),
-            headless=settings.browser_headless,
-            args=[
-                # Anti-detection
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-site-isolation-trials",
-                # Performance & stability
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                # Hide automation
-                "--disable-infobars",
-                "--disable-background-networking",
-                "--disable-breakpad",
-                "--disable-component-update",
-                "--no-first-run",
-                "--no-default-browser-check",
-                # Window size (not default 800x600)
-                "--window-size=1920,1080",
-                "--start-maximized",
-            ],
+            headless=settings.browser_headless and not settings.browser_headless_new,
+            args=args,
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
