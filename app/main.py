@@ -38,6 +38,12 @@ async def run_tracker() -> None:
     sheets = GoogleSheetsService()
     sheets.connect()
 
+    # Consolidate old hourly columns at startup (if >= 3 hourly columns for a date)
+    tracker_for_consolidation = PositionTracker(sheets, parser=None)  # type: ignore
+    consolidated = tracker_for_consolidation.consolidate_old_hourly_columns(min_columns=3)
+    if consolidated > 0:
+        await telegram.send_message(f"Консолидировано {consolidated} дат со старыми данными")
+
     captcha_solver = create_captcha_solver()
 
     try:

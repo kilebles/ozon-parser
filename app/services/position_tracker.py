@@ -251,6 +251,53 @@ class PositionTracker:
         logger.info(f"Running daily consolidation for yesterday ({yesterday})")
         return self.consolidate_daily_results(worksheet, yesterday)
 
+    def consolidate_old_hourly_columns(self, min_columns: int = 3) -> int:
+        """
+        Find and consolidate all dates that have more than min_columns hourly columns.
+        Called at startup to clean up old data.
+
+        Args:
+            min_columns: Minimum hourly columns to trigger consolidation (default 3)
+
+        Returns:
+            Number of dates consolidated.
+        """
+        worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
+        headers = worksheet.row_values(1)
+
+        # Find all unique dates with hourly columns
+        # Pattern: "DD.MM HH:00"
+        hourly_pattern = re.compile(r"^(\d{2}\.\d{2}) \d{2}:00$")
+        dates_with_hours: dict[str, int] = {}
+
+        for header in headers:
+            match = hourly_pattern.match(header)
+            if match:
+                date_str = match.group(1)
+                dates_with_hours[date_str] = dates_with_hours.get(date_str, 0) + 1
+
+        # Filter dates with enough hourly columns
+        dates_to_consolidate = [
+            date_str for date_str, count in dates_with_hours.items()
+            if count >= min_columns
+        ]
+
+        if not dates_to_consolidate:
+            logger.info("No dates with enough hourly columns to consolidate")
+            return 0
+
+        logger.info(f"Found {len(dates_to_consolidate)} dates to consolidate: {dates_to_consolidate}")
+
+        consolidated = 0
+        for date_str in dates_to_consolidate:
+            # Re-fetch worksheet to get updated headers after each consolidation
+            worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
+            if self.consolidate_daily_results(worksheet, date_str):
+                consolidated += 1
+
+        logger.info(f"Consolidated {consolidated} dates at startup")
+        return consolidated
+
     async def _write_cell_async(self, worksheet, row: int, col: int, value: str) -> None:
         """Write to cell asynchronously without blocking."""
         try:
