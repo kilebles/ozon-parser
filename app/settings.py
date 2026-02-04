@@ -8,7 +8,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    browser_headless: bool = True
+    browser_headless: bool | str = "new"  # True, False, or "new" (new headless mode)
     browser_timeout: int = 30000
     base_url: str = "https://www.ozon.ru"
     # Scroll delay settings (milliseconds)
