@@ -145,8 +145,8 @@ class PositionTracker:
             headers: List of column headers
             date_str: Date in format "DD.MM" (e.g., "03.02")
         """
-        # Pattern: "28.01 14:00" (date with hour)
-        pattern = re.compile(rf"^{re.escape(date_str)} \d{{2}}:00$")
+        # Pattern: "28.01 14:00" or "28.01 6:00" (date with hour, 1 or 2 digits)
+        pattern = re.compile(rf"^{re.escape(date_str)} \d{{1,2}}:\d{{2}}$")
 
         columns = []
         for i, header in enumerate(headers):
@@ -289,8 +289,8 @@ class PositionTracker:
         headers = worksheet.row_values(1)
 
         # Find all unique dates with hourly columns
-        # Pattern: "DD.MM HH:00"
-        hourly_pattern = re.compile(r"^(\d{2}\.\d{2}) \d{2}:00$")
+        # Pattern: "DD.MM HH:MM" (1 or 2 digit hour)
+        hourly_pattern = re.compile(r"^(\d{2}\.\d{2}) \d{1,2}:\d{2}$")
         dates_with_hours: dict[str, int] = {}
 
         for header in headers:
