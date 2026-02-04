@@ -85,8 +85,24 @@ class OzonParser:
             user_data_dir=str(user_data_dir),
             headless=settings.browser_headless,
             args=[
+                # Anti-detection
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-site-isolation-trials",
+                # Performance & stability
                 "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                # Hide automation
+                "--disable-infobars",
+                "--disable-background-networking",
+                "--disable-breakpad",
+                "--disable-component-update",
+                "--no-first-run",
+                "--no-default-browser-check",
+                # Window size (not default 800x600)
+                "--window-size=1920,1080",
+                "--start-maximized",
             ],
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) "
@@ -99,6 +115,10 @@ class OzonParser:
             ),
             viewport={"width": 1920, "height": 1080},
             locale="ru-RU",
+            color_scheme="light",
+            timezone_id="Europe/Moscow",
+            geolocation={"latitude": 55.7558, "longitude": 37.6173},  # Moscow
+            permissions=["geolocation"],
         )
 
         proxy = self._get_next_proxy()
@@ -157,6 +177,52 @@ class OzonParser:
             raise RuntimeError("Context not initialized. Use async with.")
         page = await self._context.new_page()
         page.set_default_timeout(settings.browser_timeout)
+
+        # Inject anti-detection scripts before any page load
+        await page.add_init_script("""
+            // Hide webdriver
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+
+            // Hide automation plugins
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [
+                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                    { name: 'Native Client', filename: 'internal-nacl-plugin' }
+                ]
+            });
+
+            // Hide languages inconsistency
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['ru-RU', 'ru', 'en-US', 'en']
+            });
+
+            // Fix permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+
+            // Hide chrome runtime
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+
+            // Fix iframe contentWindow
+            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+                get: function() {
+                    return window;
+                }
+            });
+        """)
+
         return page
 
     async def _warmup(self, page: Page) -> None:
