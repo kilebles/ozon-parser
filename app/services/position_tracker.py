@@ -321,11 +321,21 @@ class PositionTracker:
         logger.info(f"Consolidated {consolidated} dates at startup")
         return consolidated
 
-    async def _write_cell_async(self, worksheet, row: int, col: int, value: str) -> None:
-        """Write to cell asynchronously without blocking."""
+    async def _write_cell_async(
+        self, worksheet, row: int, col: int, value: str, is_found: bool = False
+    ) -> None:
+        """Write to cell asynchronously without blocking. Green background if found."""
         try:
-            # Run blocking gspread call in thread pool to not block event loop
             await asyncio.to_thread(worksheet.update_cell, row, col, value)
+
+            # Set green background if position found (< 1000)
+            if is_found:
+                cell_label = f"{self._col_letter(col)}{row}"
+                await asyncio.to_thread(
+                    worksheet.format,
+                    cell_label,
+                    {"backgroundColor": {"red": 0.7, "green": 1.0, "blue": 0.7}}
+                )
         except Exception as e:
             logger.error(f"Failed to write to cell ({row}, {col}): {e}")
 
@@ -426,7 +436,8 @@ class PositionTracker:
                     )
             break
 
-        if position is not None and position > 0:
+        is_found = position is not None and position > 0
+        if is_found:
             result = str(position)
         elif position is None:
             result = f"{max_position}+"
@@ -434,7 +445,7 @@ class PositionTracker:
             result = "—"
 
         logger.info(f"[Worker {worker_id}] Position for {task.article}: {result}")
-        return (task, result, page)
+        return (task, result, page, is_found)
 
     async def _worker(
         self,
@@ -460,8 +471,9 @@ class PositionTracker:
                 if task_num > 1:
                     await asyncio.sleep(random.uniform(1, 3))
 
+                is_found = False
                 try:
-                    task, result, page = await self._process_single_task(
+                    task, result, page, is_found = await self._process_single_task(
                         task, task_num, total_tasks, max_position, page, worker_id
                     )
                 except Exception as e:
@@ -477,8 +489,8 @@ class PositionTracker:
 
                 results.append((task, result))
 
-                # Write result immediately
-                await self._write_cell_async(worksheet, task.row_index, col_idx, result)
+                # Write result immediately (green if found)
+                await self._write_cell_async(worksheet, task.row_index, col_idx, result, is_found)
 
                 task_queue.task_done()
         finally:
