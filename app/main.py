@@ -38,12 +38,6 @@ async def run_tracker() -> None:
     sheets = GoogleSheetsService()
     sheets.connect()
 
-    # Consolidate old hourly columns at startup (if >= 3 hourly columns for a date)
-    tracker_for_consolidation = PositionTracker(sheets, parser=None)  # type: ignore
-    consolidated = tracker_for_consolidation.consolidate_old_hourly_columns(min_columns=3)
-    if consolidated > 0:
-        await telegram.send_message(f"Консолидировано {consolidated} дат со старыми данными")
-
     captcha_solver = create_captcha_solver()
 
     try:
@@ -86,6 +80,22 @@ def consolidation_job() -> None:
         logger.info("No consolidation needed")
 
 
+def consolidate_all_job() -> None:
+    """
+    Consolidate all dates with >= 3 hourly columns into daily averages.
+    Run manually with --consolidate-all flag.
+    """
+    logger.info("Starting consolidation of all old hourly columns...")
+
+    sheets = GoogleSheetsService()
+    sheets.connect()
+
+    tracker = PositionTracker(sheets, parser=None)  # type: ignore
+    count = tracker.consolidate_old_hourly_columns(min_columns=3)
+
+    logger.info(f"Consolidation complete: {count} dates processed")
+
+
 if __name__ == "__main__":
     setup_logging()
 
@@ -93,8 +103,11 @@ if __name__ == "__main__":
     if "--once" in sys.argv:
         job()
     elif "--consolidate" in sys.argv:
-        # Run consolidation manually
+        # Run yesterday's consolidation manually
         consolidation_job()
+    elif "--consolidate-all" in sys.argv:
+        # Consolidate all old hourly columns
+        consolidate_all_job()
     else:
         logger.info("Starting scheduler (tracking: every 2 hours, consolidation: 12:00)")
         # Run immediately, then at fixed hours

@@ -221,22 +221,45 @@ class PositionTracker:
             else:
                 averages.append("")
 
-        # Find leftmost hourly column position for inserting the daily column
+        # Find leftmost hourly column position
         insert_position = min(hourly_columns)
 
-        # Delete hourly columns (from right to left to preserve indices)
+        # First, update the leftmost column with averages (reuse it as daily column)
+        # Update header
+        worksheet.update_cell(1, insert_position, date_str)
+
+        # Update values in batch
+        if averages:
+            cells_to_update = []
+            for row_idx, avg in enumerate(averages, start=2):  # Start from row 2
+                cells_to_update.append({
+                    'range': f'{self._col_letter(insert_position)}{row_idx}',
+                    'values': [[avg]]
+                })
+
+            # Batch update in chunks to avoid API limits
+            for i in range(0, len(cells_to_update), 100):
+                chunk = cells_to_update[i:i+100]
+                worksheet.batch_update(chunk)
+
+        # Delete other hourly columns (from right to left, skip the one we kept)
         hourly_columns_sorted = sorted(hourly_columns, reverse=True)
         for col_idx in hourly_columns_sorted:
-            worksheet.delete_columns(col_idx)
-            logger.debug(f"Deleted column {col_idx}")
-
-        # Insert new daily column at the position where first hourly column was
-        # Prepare column data: header + averages
-        column_data = [[date_str]] + [[avg] for avg in averages]
-        worksheet.insert_cols(column_data, col=insert_position)
+            if col_idx != insert_position:
+                worksheet.delete_columns(col_idx)
+                logger.debug(f"Deleted column {col_idx}")
 
         logger.info(f"Consolidated into daily column '{date_str}' with averages")
         return True
+
+    @staticmethod
+    def _col_letter(col_num: int) -> str:
+        """Convert column number (1-based) to letter (A, B, ..., Z, AA, AB, ...)."""
+        result = ""
+        while col_num > 0:
+            col_num, remainder = divmod(col_num - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
 
     def consolidate_yesterday(self) -> bool:
         """
