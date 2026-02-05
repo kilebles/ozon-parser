@@ -179,11 +179,32 @@ class OzonParser:
             )
             logger.info("Browser restarted with clean profile")
 
-    async def _new_page(self) -> Page:
+    async def _new_page(self, block_resources: bool = True) -> Page:
         if not self._context:
             raise RuntimeError("Context not initialized. Use async with.")
         page = await self._context.new_page()
         page.set_default_timeout(settings.browser_timeout)
+
+        # Block heavy resources to speed up loading
+        if block_resources:
+            blocked_types = {"image", "stylesheet", "font", "media"}
+            # Also block tracking/analytics URLs
+            blocked_urls = ["mc.yandex", "google-analytics", "facebook", "vk.com/rtrg", "top-fwz", "criteo"]
+
+            async def handle_route(route):
+                request = route.request
+                url = request.url
+                # Block by resource type
+                if request.resource_type in blocked_types:
+                    await route.abort()
+                    return
+                # Block tracking/analytics
+                if any(blocked in url for blocked in blocked_urls):
+                    await route.abort()
+                    return
+                await route.continue_()
+
+            await page.route("**/*", handle_route)
 
         # Apply stealth mode (hides webdriver, fixes fingerprints, etc.)
         stealth = Stealth(
@@ -247,6 +268,25 @@ class OzonParser:
             return False
         except Exception:
             return False
+
+    async def _check_page_status(self, page: Page) -> tuple[bool, bool]:
+        """Check for captcha and block in a single JS call. Returns (is_captcha, is_blocked)."""
+        try:
+            result = await page.evaluate("""
+                () => {
+                    const title = document.title.toLowerCase();
+                    const captchaKeywords = ['бот', 'robot', 'bot', 'captcha', 'подтверд', 'confirm', 'antibot', 'challenge'];
+                    const isCaptcha = captchaKeywords.some(kw => title.includes(kw));
+
+                    const h1 = document.querySelector('h1');
+                    const isBlocked = h1 && h1.innerText.toLowerCase().includes('доступ ограничен');
+
+                    return { isCaptcha, isBlocked };
+                }
+            """)
+            return result.get("isCaptcha", False), result.get("isBlocked", False)
+        except Exception:
+            return False, False
 
     async def _wait_for_captcha(self, page: Page) -> None:
         """Attempt to solve captcha automatically via RuCaptcha, fallback to manual."""
@@ -414,13 +454,24 @@ class OzonParser:
     async def _collect_products_from_page(
         self, page: Page, seen_products: set[str]
     ) -> list[str]:
-        """Collect new product IDs from current page state."""
-        links = await page.query_selector_all("a[href*='/product/']")
+        """Collect new product IDs from current page state using fast JS extraction."""
+        # Extract all product IDs in a single JS call (much faster than iterating in Python)
+        all_ids = await page.evaluate("""
+            () => {
+                const ids = [];
+                const links = document.querySelectorAll('a[href*="/product/"]');
+                for (const link of links) {
+                    const href = link.getAttribute('href');
+                    if (!href || href.includes('/reviews') || href.includes('/questions')) continue;
+                    const match = href.match(/\\/product\\/[^?]*-(\\d+)/);
+                    if (match) ids.push(match[1]);
+                }
+                return [...new Set(ids)];  // Deduplicate
+            }
+        """)
         new_products: list[str] = []
-        for link in links:
-            href = await link.get_attribute("href")
-            product_id = self._extract_product_id(href)
-            if product_id and product_id not in seen_products:
+        for product_id in all_ids:
+            if product_id not in seen_products:
                 seen_products.add(product_id)
                 new_products.append(product_id)
         return new_products
@@ -491,44 +542,50 @@ class OzonParser:
 
             # Scroll and load more products
             no_new_products_count = 0
-            max_no_new_products = 3  # Reduced: faster end detection
+            max_no_new_products = 4  # Allow a few empty scrolls before giving up
             same_height_count = 0  # Track consecutive same-height scrolls
 
             while position < max_position:
                 scroll_count += 1
 
-                prev_height = await page.evaluate("document.body.scrollHeight")
+                # Scroll and get height in one call
+                prev_height = await page.evaluate("""
+                    () => {
+                        const h = document.body.scrollHeight;
+                        window.scrollTo(0, h);
+                        return h;
+                    }
+                """)
 
-                # Fast scroll without extra wheel event
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-
-                # Adaptive wait: start short, extend only if needed
+                # Wait for content to load with adaptive timing
                 new_products = []
-                for wait_attempt in range(5):  # Max 2.5 seconds (was 10s)
-                    await page.wait_for_timeout(500)  # 500ms intervals (was 1000ms)
+                for wait_attempt in range(4):  # Up to 2 seconds total
+                    await page.wait_for_timeout(500)
 
-                    # Check for captcha/block only on first wait
-                    if wait_attempt == 0:
-                        if await self._is_captcha_page(page):
-                            await self._wait_for_captcha(page)
-                            await page.wait_for_timeout(1000)
-
-                        if await self._is_blocked_page(page):
-                            if not await self._handle_block_page(page):
-                                logger.error("Failed to bypass block page during scroll")
-                                return -1
-
-                    # Check if new products appeared
+                    # Check for new products (fast JS extraction)
                     new_products = await self._collect_products_from_page(page, set(seen_products))
                     if new_products:
                         break
 
-                    # Early exit if page height unchanged after 2 attempts
+                    # Check if page height changed - still loading
                     current_height = await page.evaluate("document.body.scrollHeight")
                     if current_height == prev_height and wait_attempt >= 1:
+                        # Height stable and no new products - probably done
                         break
 
-                # Collect all new products
+                # Check captcha/block only if no products after waiting
+                if not new_products:
+                    is_captcha, is_blocked = await self._check_page_status(page)
+                    if is_captcha:
+                        await self._wait_for_captcha(page)
+                        continue
+                    if is_blocked:
+                        if not await self._handle_block_page(page):
+                            logger.error("Failed to bypass block page during scroll")
+                            return -1
+                        continue
+
+                # Collect final products and check height
                 new_products = await self._collect_products_from_page(page, seen_products)
                 current_height = await page.evaluate("document.body.scrollHeight")
 
@@ -537,15 +594,17 @@ class OzonParser:
                         same_height_count += 1
                         # Fast end detection: 2 consecutive scrolls with no growth = end
                         if same_height_count >= 2:
-                            logger.info(f"Reached end of page (stable height), total checked: {position}")
-                            break
+                            logger.info(f"Reached end of search results, total checked: {position}")
+                            # This is normal - search results ended, not an error
+                            return None
                     else:
                         same_height_count = 0  # Reset if page grew (banner/footer)
 
                     no_new_products_count += 1
                     if no_new_products_count >= max_no_new_products:
                         logger.info(f"No more products loading, total checked: {position}")
-                        break
+                        # Normal end of results
+                        return None
                     continue
 
                 no_new_products_count = 0
@@ -565,13 +624,7 @@ class OzonParser:
                 if position % 300 == 0:
                     logger.info(f"Progress: checked {position} products (scroll #{scroll_count})...")
 
-            if position < max_position:
-                logger.warning(
-                    f"INCOMPLETE: Only checked {position}/{max_position} positions "
-                    f"(page ended prematurely)"
-                )
-                return -1
-
+            # If we exit the loop normally, article was not found
             logger.info(f"NOT FOUND: Article {target_article} not in top {position} positions")
             logger.info(f"Total scrolls: {scroll_count}")
             return None
@@ -585,11 +638,11 @@ class OzonParser:
         page = await self._new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(1000)
 
             if await self._is_captcha_page(page):
                 await self._wait_for_captcha(page)
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(500)
 
             try:
                 await page.wait_for_selector("h1", timeout=15000)

@@ -328,14 +328,17 @@ class PositionTracker:
         try:
             await asyncio.to_thread(worksheet.update_cell, row, col, value)
 
-            # Set green background if position found (< 1000)
+            # Set background color: green if found, white otherwise
+            cell_label = f"{self._col_letter(col)}{row}"
             if is_found:
-                cell_label = f"{self._col_letter(col)}{row}"
-                await asyncio.to_thread(
-                    worksheet.format,
-                    cell_label,
-                    {"backgroundColor": {"red": 0.7, "green": 1.0, "blue": 0.7}}
-                )
+                bg_color = {"red": 0.7, "green": 1.0, "blue": 0.7}  # Light green
+            else:
+                bg_color = {"red": 1.0, "green": 1.0, "blue": 1.0}  # White
+            await asyncio.to_thread(
+                worksheet.format,
+                cell_label,
+                {"backgroundColor": bg_color}
+            )
         except Exception as e:
             logger.error(f"Failed to write to cell ({row}, {col}): {e}")
 
@@ -421,18 +424,16 @@ class PositionTracker:
                 break
 
             if position == -1:
+                # -1 means block page detected, retry with fresh browser
                 if attempt < 2:
-                    logger.warning(f"[Worker {worker_id}] Incomplete results, retrying...")
-                    await self._notify_error(
-                        f"[W{worker_id}] Неполные результаты '{task.query}' (попытка {attempt + 2}/3)", page
-                    )
+                    logger.warning(f"[Worker {worker_id}] Blocked during search, retrying...")
                     await self._safe_close_page(page)
                     page = await self._get_fresh_page(worker_id)
                     await asyncio.sleep(random.uniform(3, 6))
                     continue
                 else:
                     await self._notify_error(
-                        f"[W{worker_id}] Не удалось получить результаты '{task.query}'", page
+                        f"[W{worker_id}] Блокировка при поиске '{task.query}'", page
                     )
             break
 
