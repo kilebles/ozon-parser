@@ -467,9 +467,9 @@ class PositionTracker:
                 except asyncio.QueueEmpty:
                     break
 
-                # Random delay between tasks to look more human
+                # Short random delay between tasks
                 if task_num > 1:
-                    await asyncio.sleep(random.uniform(1, 3))
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
 
                 is_found = False
                 try:
@@ -524,7 +524,7 @@ class PositionTracker:
         workers = []
         for worker_id in range(num_workers):
             if worker_id > 0:
-                await asyncio.sleep(random.uniform(2, 4))  # Stagger worker starts
+                await asyncio.sleep(random.uniform(1, 2))  # Stagger worker starts
             worker = asyncio.create_task(
                 self._worker(worker_id, task_queue, len(tasks), max_position, worksheet, col_idx, results)
             )

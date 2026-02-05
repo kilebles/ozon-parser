@@ -12,11 +12,6 @@ class Settings(BaseSettings):
     browser_headless_new: bool = True  # Use new headless mode (less detectable)
     browser_timeout: int = 30000
     base_url: str = "https://www.ozon.ru"
-    # Scroll delay settings (milliseconds)
-    scroll_networkidle_timeout: int = 5000  # Max wait for new content after scroll
-    scroll_fallback_delay: int = 300  # Fallback delay if networkidle times out
-    initial_load_networkidle_timeout: int = 3000  # Max wait for initial page load
-    initial_load_fallback_delay: int = 500  # Fallback delay if initial networkidle times out
 
     # Logging level: DEBUG, INFO, WARNING, ERROR
     log_level: str = "INFO"
