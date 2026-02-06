@@ -61,26 +61,38 @@ async def main():
         js_time = time.time() - start
         print(f"   100 JS calls in {js_time:.2f}s ({js_time*10:.0f}ms per call)")
 
-        # 7. Product extraction
-        print("\n⏱️  Product extraction...")
+        # 7. Product extraction (optimized)
+        print("\n⏱️  Product extraction (optimized)...")
         await page.goto("https://www.ozon.ru/search/?text=брюки", wait_until="domcontentloaded")
         await page.wait_for_timeout(1000)
 
         start = time.time()
         for _ in range(10):
             await page.evaluate("""
-                () => {
+                (seen) => {
+                    const seenSet = new Set(seen);
                     const ids = [];
-                    const links = document.querySelectorAll('a[href*="/product/"]');
-                    for (const link of links) {
-                        const href = link.getAttribute('href');
-                        if (!href) continue;
-                        const match = href.match(/\\/product\\/[^?]*-(\\d+)/);
-                        if (match) ids.push(match[1]);
+                    const links = document.getElementsByTagName('a');
+                    for (let i = 0; i < links.length; i++) {
+                        const href = links[i].href;
+                        if (!href || !href.includes('/product/')) continue;
+                        if (href.includes('/reviews') || href.includes('/questions')) continue;
+                        const productIdx = href.indexOf('/product/');
+                        if (productIdx === -1) continue;
+                        const afterProduct = href.substring(productIdx + 9);
+                        const queryIdx = afterProduct.indexOf('?');
+                        const path = queryIdx > -1 ? afterProduct.substring(0, queryIdx) : afterProduct;
+                        const lastDash = path.lastIndexOf('-');
+                        if (lastDash === -1) continue;
+                        const id = path.substring(lastDash + 1).replace(/\\/$/, '');
+                        if (!/^\\d+$/.test(id)) continue;
+                        if (!seenSet.has(id) && !ids.includes(id)) {
+                            ids.push(id);
+                        }
                     }
-                    return [...new Set(ids)];
+                    return ids;
                 }
-            """)
+            """, [])
         extract_time = time.time() - start
         print(f"   10 extractions in {extract_time:.2f}s ({extract_time*100:.0f}ms per extraction)")
 

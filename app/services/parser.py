@@ -851,27 +851,42 @@ class OzonParser:
     async def _collect_products_from_page(
         self, page: Page, seen_products: set[str]
     ) -> list[str]:
-        """Collect new product IDs from current page state using fast JS extraction."""
-        # Extract all product IDs in a single JS call (much faster than iterating in Python)
+        """Collect new product IDs from current page state using optimized JS extraction."""
+        # Pass seen products to JS to filter there (reduces data transfer)
+        seen_list = list(seen_products) if len(seen_products) < 2000 else []
+
         all_ids = await page.evaluate("""
-            () => {
+            (seen) => {
+                const seenSet = new Set(seen);
                 const ids = [];
-                const links = document.querySelectorAll('a[href*="/product/"]');
-                for (const link of links) {
-                    const href = link.getAttribute('href');
-                    if (!href || href.includes('/reviews') || href.includes('/questions')) continue;
-                    const match = href.match(/\\/product\\/[^?]*-(\\d+)/);
-                    if (match) ids.push(match[1]);
+                // Use faster iteration with early termination hints
+                const links = document.getElementsByTagName('a');
+                for (let i = 0; i < links.length; i++) {
+                    const href = links[i].href;
+                    if (!href || !href.includes('/product/')) continue;
+                    if (href.includes('/reviews') || href.includes('/questions')) continue;
+                    // Extract ID directly without full regex
+                    const productIdx = href.indexOf('/product/');
+                    if (productIdx === -1) continue;
+                    const afterProduct = href.substring(productIdx + 9);
+                    const queryIdx = afterProduct.indexOf('?');
+                    const path = queryIdx > -1 ? afterProduct.substring(0, queryIdx) : afterProduct;
+                    const lastDash = path.lastIndexOf('-');
+                    if (lastDash === -1) continue;
+                    const id = path.substring(lastDash + 1).replace(/\\/$/, '');
+                    if (!/^\\d+$/.test(id)) continue;
+                    if (!seenSet.has(id) && !ids.includes(id)) {
+                        ids.push(id);
+                    }
                 }
-                return [...new Set(ids)];  // Deduplicate
+                return ids;
             }
-        """)
-        new_products: list[str] = []
+        """, seen_list)
+
+        # Update seen set and return new products
         for product_id in all_ids:
-            if product_id not in seen_products:
-                seen_products.add(product_id)
-                new_products.append(product_id)
-        return new_products
+            seen_products.add(product_id)
+        return all_ids
 
     async def find_product_position(
         self, query: str, target_article: str, max_position: int = 1000, page: Page | None = None
@@ -954,13 +969,26 @@ class OzonParser:
             # Check if infinite scroll works (products > 30 usually means it works)
             # Try one scroll to see if more products load
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(2000)
             scroll_products = await self._collect_products_from_page(page, seen_products)
 
             use_pagination = len(scroll_products) == 0  # No new products = pagination mode
 
+            # Get actual URL after possible redirect (e.g., /search/ -> /category/)
+            current_url = page.url.split('?')[0]  # Base URL without query params
+            # Preserve query params but remove page if exists
+            current_params = page.url.split('?')[1] if '?' in page.url else ''
+            current_params = '&'.join(p for p in current_params.split('&') if not p.startswith('page='))
+
             if use_pagination:
                 logger.info("Infinite scroll disabled, switching to pagination mode")
+
+            # Add scroll products to position count
+            for product_id in scroll_products:
+                position += 1
+                if product_id == target_article:
+                    logger.info(f"Found article {target_article} at position {position}")
+                    return position
 
             # Pagination loop
             empty_pages = 0
@@ -968,13 +996,16 @@ class OzonParser:
 
             while position < max_position and page_num < max_pages:
                 if use_pagination:
-                    # Navigate to next page
+                    # Navigate to next page using current URL (after redirect)
                     page_num += 1
-                    search_url = f"{base_search_url}&page={page_num}"
-                    logger.debug(f"Opening page {page_num}: {search_url}")
+                    if current_params:
+                        pagination_url = f"{current_url}?{current_params}&page={page_num}"
+                    else:
+                        pagination_url = f"{current_url}?page={page_num}"
+                    logger.debug(f"Opening page {page_num}: {pagination_url}")
 
                     try:
-                        await page.goto(search_url, wait_until="domcontentloaded")
+                        await page.goto(pagination_url, wait_until="domcontentloaded")
                     except Exception as e:
                         if "Timeout" in str(e):
                             logger.warning(f"Page {page_num} timeout, trying to continue...")
