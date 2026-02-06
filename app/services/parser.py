@@ -148,24 +148,55 @@ class OzonParser:
                 "devtools.selfxss.count": 100,
             }
         else:
-            # Chromium args
+            # Chromium args - comprehensive anti-detection for server environment
             args = [
+                # Core anti-detection
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--disable-site-isolation-trials",
+                # Sandbox and stability
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--disable-setuid-sandbox",
+                # Hide automation indicators
                 "--disable-infobars",
                 "--disable-background-networking",
                 "--disable-breakpad",
                 "--disable-component-update",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--no-service-autorun",
+                "--password-store=basic",
+                "--use-mock-keychain",
+                # WebGL - use SwiftShader but hide it
+                "--use-gl=swiftshader",
+                "--enable-webgl",
+                "--enable-webgl2",
+                # GPU flags to avoid detection
+                "--ignore-gpu-blocklist",
+                "--enable-gpu-rasterization",
+                # Window
                 "--window-size=1920,1080",
                 "--start-maximized",
-                "--use-gl=angle",
-                "--use-angle=swiftshader",
-                "--enable-webgl",
+                # Disable features that expose headless
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-hang-monitor",
+                "--disable-ipc-flooding-protection",
+                "--disable-popup-blocking",
+                "--disable-prompt-on-repost",
+                # Font rendering (important for fingerprint)
+                "--font-render-hinting=none",
+                "--disable-font-subpixel-positioning",
+                # Disable notifications
+                "--disable-notifications",
+                "--disable-desktop-notifications",
+                # Misc
+                "--metrics-recording-only",
+                "--mute-audio",
+                "--no-pings",
+                "--disable-sync",
             ]
             if settings.browser_headless and settings.browser_headless_new:
                 args.append("--headless=new")
@@ -366,9 +397,9 @@ class OzonParser:
             )
             await stealth.apply_stealth_async(page)
 
-            # Spoof WebGL to hide server environment (no real GPU)
+            # Comprehensive stealth for server environment
             await page.add_init_script("""
-                // Fake WebGL renderer to look like real desktop GPU
+                // ============ WebGL Spoofing ============
                 const getParameterProxyHandler = {
                     apply: function(target, thisArg, args) {
                         const param = args[0];
@@ -380,11 +411,22 @@ class OzonParser:
                         if (param === 37446) {
                             return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
                         }
+                        // MAX_TEXTURE_SIZE - desktop GPU value
+                        if (param === 3379) {
+                            return 16384;
+                        }
+                        // MAX_VERTEX_ATTRIBS
+                        if (param === 34921) {
+                            return 16;
+                        }
+                        // MAX_VIEWPORT_DIMS
+                        if (param === 3386) {
+                            return new Int32Array([32767, 32767]);
+                        }
                         return Reflect.apply(target, thisArg, args);
                     }
                 };
 
-                // Apply to both WebGL contexts
                 ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(ctx => {
                     if (window[ctx]) {
                         const proto = window[ctx].prototype;
@@ -393,19 +435,175 @@ class OzonParser:
                     }
                 });
 
-                // Spoof hardware concurrency (CPU cores) - servers often have many cores
+                // ============ Canvas Fingerprint Protection ============
+                const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                HTMLCanvasElement.prototype.toDataURL = function(type) {
+                    if (this.width === 0 || this.height === 0) {
+                        return originalToDataURL.apply(this, arguments);
+                    }
+                    // Add subtle noise to canvas to randomize fingerprint
+                    const ctx = this.getContext('2d');
+                    if (ctx) {
+                        const imageData = ctx.getImageData(0, 0, this.width, this.height);
+                        const data = imageData.data;
+                        // Subtle noise - change just a few pixels slightly
+                        for (let i = 0; i < data.length; i += 4 * 100) {
+                            data[i] = data[i] ^ 1;  // XOR with 1 - minimal change
+                        }
+                        ctx.putImageData(imageData, 0, 0);
+                    }
+                    return originalToDataURL.apply(this, arguments);
+                };
+
+                const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+                CanvasRenderingContext2D.prototype.getImageData = function() {
+                    const imageData = originalGetImageData.apply(this, arguments);
+                    // Same subtle noise
+                    for (let i = 0; i < imageData.data.length; i += 4 * 100) {
+                        imageData.data[i] = imageData.data[i] ^ 1;
+                    }
+                    return imageData;
+                };
+
+                // ============ AudioContext Spoofing ============
+                // Servers often don't have audio hardware - spoof it
+                if (window.AudioContext || window.webkitAudioContext) {
+                    const OriginalAudioContext = window.AudioContext || window.webkitAudioContext;
+
+                    const spoofedAudioContext = function() {
+                        const ctx = new OriginalAudioContext();
+
+                        // Override createAnalyser to return consistent values
+                        const originalCreateAnalyser = ctx.createAnalyser.bind(ctx);
+                        ctx.createAnalyser = function() {
+                            const analyser = originalCreateAnalyser();
+                            const originalGetFloatFrequencyData = analyser.getFloatFrequencyData.bind(analyser);
+                            analyser.getFloatFrequencyData = function(array) {
+                                originalGetFloatFrequencyData(array);
+                                // Add tiny noise
+                                for (let i = 0; i < array.length; i += 10) {
+                                    array[i] = array[i] + (Math.random() * 0.0001);
+                                }
+                            };
+                            return analyser;
+                        };
+
+                        return ctx;
+                    };
+
+                    if (window.AudioContext) {
+                        window.AudioContext = spoofedAudioContext;
+                    }
+                    if (window.webkitAudioContext) {
+                        window.webkitAudioContext = spoofedAudioContext;
+                    }
+                }
+
+                // ============ Hardware/Navigator Spoofing ============
                 Object.defineProperty(navigator, 'hardwareConcurrency', {
-                    get: () => 8  // Typical desktop
+                    get: () => 8
                 });
 
-                // Spoof device memory
                 Object.defineProperty(navigator, 'deviceMemory', {
-                    get: () => 8  // 8GB typical desktop
+                    get: () => 8
                 });
 
-                // Hide that we're running without a real screen
+                // Connection API - look like broadband
+                if (navigator.connection) {
+                    Object.defineProperty(navigator.connection, 'effectiveType', {
+                        get: () => '4g'
+                    });
+                    Object.defineProperty(navigator.connection, 'downlink', {
+                        get: () => 10
+                    });
+                    Object.defineProperty(navigator.connection, 'rtt', {
+                        get: () => 50
+                    });
+                }
+
+                // ============ Screen Properties ============
                 Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
                 Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+                Object.defineProperty(screen, 'availWidth', { get: () => screen.width });
+                Object.defineProperty(screen, 'availHeight', { get: () => screen.height - 40 }); // Taskbar
+
+                // ============ Plugins (Chrome shows some by default) ============
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => {
+                        const plugins = [
+                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                        ];
+                        plugins.item = (i) => plugins[i];
+                        plugins.namedItem = (name) => plugins.find(p => p.name === name);
+                        plugins.refresh = () => {};
+                        return plugins;
+                    }
+                });
+
+                // ============ Permissions API ============
+                if (navigator.permissions) {
+                    const originalQuery = navigator.permissions.query;
+                    navigator.permissions.query = (parameters) => {
+                        if (parameters.name === 'notifications') {
+                            return Promise.resolve({ state: 'prompt', onchange: null });
+                        }
+                        if (parameters.name === 'push') {
+                            return Promise.resolve({ state: 'prompt', onchange: null });
+                        }
+                        if (parameters.name === 'midi') {
+                            return Promise.resolve({ state: 'prompt', onchange: null });
+                        }
+                        return originalQuery.call(navigator.permissions, parameters);
+                    };
+                }
+
+                // ============ Battery API (if available) ============
+                if (navigator.getBattery) {
+                    navigator.getBattery = () => Promise.resolve({
+                        charging: true,
+                        chargingTime: 0,
+                        dischargingTime: Infinity,
+                        level: 1.0,
+                        addEventListener: () => {},
+                        removeEventListener: () => {}
+                    });
+                }
+
+                // ============ Timezone consistency ============
+                const moscowOffset = -180;
+                Date.prototype.getTimezoneOffset = function() { return moscowOffset; };
+
+                // ============ Hide automation indicators ============
+                // Remove Playwright/Puppeteer traces
+                delete window.__playwright;
+                delete window.__puppeteer_evaluation_script__;
+                delete window.__selenium_unwrapped;
+                delete window.__driver_evaluate;
+                delete window.__webdriver_evaluate;
+                delete window.__fxdriver_evaluate;
+                delete window.__driver_unwrapped;
+                delete window.__webdriver_unwrapped;
+                delete window.__fxdriver_unwrapped;
+                delete window._Selenium_IDE_Recorder;
+                delete window._selenium;
+                delete window.calledSelenium;
+                delete document.__webdriver_script_fn;
+                delete document.$cdc_asdjflasutopfhvcZLmcfl_;
+                delete document.$chrome_asyncScriptInfo;
+
+                // Hide headless indicators in error stack traces
+                const originalError = Error;
+                Error = function(...args) {
+                    const error = new originalError(...args);
+                    const originalStack = error.stack;
+                    if (originalStack) {
+                        error.stack = originalStack.replace(/headless/gi, 'chrome');
+                    }
+                    return error;
+                };
+                Error.prototype = originalError.prototype;
             """)
 
         return page
