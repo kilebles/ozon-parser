@@ -612,8 +612,13 @@ class OzonParser:
         logger.info("Warming up: visiting ozon.ru homepage")
         try:
             await page.goto(settings.base_url, wait_until="domcontentloaded")
-            # Short wait, no need for full networkidle
-            await page.wait_for_timeout(1000)
+            # Human-like: wait a bit and move mouse
+            await page.wait_for_timeout(random.randint(500, 1200))
+            await page.mouse.move(
+                random.randint(300, 900),
+                random.randint(200, 500)
+            )
+            await page.wait_for_timeout(random.randint(200, 500))
         except Exception:
             await page.wait_for_timeout(500)
         logger.info("Warmup complete")
@@ -904,6 +909,14 @@ class OzonParser:
                         raise OzonPageLoadError(f"Page load timeout for query: {query}")
                 else:
                     raise OzonPageLoadError(f"Page load error: {e}")
+
+            # Human-like behavior: small random delay + mouse movement after page load
+            await page.wait_for_timeout(random.randint(300, 800))
+            # Move mouse to simulate human presence (fast, no click)
+            await page.mouse.move(
+                random.randint(400, 800),
+                random.randint(200, 400)
+            )
 
             # Wait for products to load
             try:
