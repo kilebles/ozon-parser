@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Proxy list (comma-separated, format: user:pass@host:port)
     proxy_list: str = ""
 
+    # Single proxy server (e.g., "http://127.0.0.1:8888")
+    proxy_server: str = ""
+
     # Parallel tabs for parsing (be careful, high values may trigger ban)
     parallel_tabs: int = 1
 

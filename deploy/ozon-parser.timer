@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Ozon Parser every hour
+
+[Timer]
+# Run every hour at minute 0
+OnCalendar=*-*-* *:00:00
+# Run immediately if last run was missed (e.g., server was down)
+Persistent=true
+# Random delay up to 5 minutes to avoid exact timing
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

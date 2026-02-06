@@ -55,7 +55,13 @@ class OzonParser:
         return proxies
 
     def _get_next_proxy(self) -> dict | None:
-        """Get next proxy in rotation."""
+        """Get next proxy in rotation, or single proxy_server if set."""
+        # Priority 1: Single proxy server (e.g., "http://127.0.0.1:8888")
+        if settings.proxy_server:
+            logger.info(f"Using proxy server: {settings.proxy_server}")
+            return {"server": settings.proxy_server}
+
+        # Priority 2: Proxy rotation list
         if not self._proxies:
             return None
 
@@ -90,7 +96,6 @@ class OzonParser:
             # Performance & stability
             "--no-sandbox",
             "--disable-dev-shm-usage",
-            "--disable-gpu",
             # Hide automation
             "--disable-infobars",
             "--disable-background-networking",
@@ -101,6 +106,10 @@ class OzonParser:
             # Window size (not default 800x600)
             "--window-size=1920,1080",
             "--start-maximized",
+            # Fake GPU to hide server environment
+            "--use-gl=angle",
+            "--use-angle=swiftshader",  # Software rendering but with spoofed name
+            "--enable-webgl",
         ]
 
         # Use new headless mode if enabled (less detectable)
@@ -212,6 +221,48 @@ class OzonParser:
             navigator_platform_override="Linux x86_64" if platform.system() == "Linux" else "MacIntel",
         )
         await stealth.apply_stealth_async(page)
+
+        # Spoof WebGL to hide server environment (no real GPU)
+        await page.add_init_script("""
+            // Fake WebGL renderer to look like real desktop GPU
+            const getParameterProxyHandler = {
+                apply: function(target, thisArg, args) {
+                    const param = args[0];
+                    // UNMASKED_VENDOR_WEBGL
+                    if (param === 37445) {
+                        return 'Google Inc. (NVIDIA)';
+                    }
+                    // UNMASKED_RENDERER_WEBGL
+                    if (param === 37446) {
+                        return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                    }
+                    return Reflect.apply(target, thisArg, args);
+                }
+            };
+
+            // Apply to both WebGL contexts
+            ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(ctx => {
+                if (window[ctx]) {
+                    const proto = window[ctx].prototype;
+                    const originalGetParameter = proto.getParameter;
+                    proto.getParameter = new Proxy(originalGetParameter, getParameterProxyHandler);
+                }
+            });
+
+            // Spoof hardware concurrency (CPU cores) - servers often have many cores
+            Object.defineProperty(navigator, 'hardwareConcurrency', {
+                get: () => 8  // Typical desktop
+            });
+
+            // Spoof device memory
+            Object.defineProperty(navigator, 'deviceMemory', {
+                get: () => 8  // 8GB typical desktop
+            });
+
+            // Hide that we're running without a real screen
+            Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+            Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+        """)
 
         return page
 
