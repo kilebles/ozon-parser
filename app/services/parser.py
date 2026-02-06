@@ -947,26 +947,29 @@ class OzonParser:
 
             # Scroll and load more products
             no_new_products_count = 0
-            max_no_new_products = 4  # Allow a few empty scrolls before giving up
+            max_no_new_products = 6  # Allow more empty scrolls (server is slower)
             same_height_count = 0  # Track consecutive same-height scrolls
 
             while position < max_position:
                 scroll_count += 1
 
-                # Human-like scroll: slight randomization in scroll distance (no delay added)
-                scroll_variance = random.randint(-50, 100)
-                prev_height = await page.evaluate(f"""
-                    () => {{
+                # More gradual scroll to trigger lazy loading properly
+                # Scroll by viewport height instead of jumping to bottom
+                prev_height = await page.evaluate("""
+                    () => {
                         const h = document.body.scrollHeight;
-                        // Scroll to near-bottom with small variance to look human
-                        window.scrollTo(0, h + {scroll_variance});
+                        const viewportHeight = window.innerHeight;
+                        const currentScroll = window.scrollY;
+                        // Scroll down by ~80% of viewport height (more natural)
+                        const newScroll = Math.min(currentScroll + viewportHeight * 0.8, h);
+                        window.scrollTo({ top: newScroll, behavior: 'instant' });
                         return h;
-                    }}
+                    }
                 """)
 
-                # Wait for content to load with adaptive timing
+                # Wait for content to load - longer timeout for server environment
                 new_products = []
-                for wait_attempt in range(4):  # Up to 2 seconds total
+                for wait_attempt in range(6):  # Up to 3 seconds total
                     await page.wait_for_timeout(500)
 
                     # Check for new products (fast JS extraction)
@@ -976,9 +979,20 @@ class OzonParser:
 
                     # Check if page height changed - still loading
                     current_height = await page.evaluate("document.body.scrollHeight")
-                    if current_height == prev_height and wait_attempt >= 1:
-                        # Height stable and no new products - probably done
-                        break
+                    if current_height > prev_height:
+                        # Page is growing, keep waiting
+                        continue
+                    if wait_attempt >= 2:
+                        # Height stable for 1+ second and no new products
+                        # Try to trigger lazy load explicitly
+                        await page.evaluate("""
+                            () => {
+                                // Dispatch scroll event to trigger observers
+                                window.dispatchEvent(new Event('scroll'));
+                                // Also try scrolling a tiny bit more
+                                window.scrollBy(0, 100);
+                            }
+                        """)
 
                 # Check captcha/block only if no products after waiting
                 if not new_products:
@@ -999,8 +1013,8 @@ class OzonParser:
                 if not new_products:
                     if current_height == prev_height:
                         same_height_count += 1
-                        # Fast end detection: 2 consecutive scrolls with no growth = end
-                        if same_height_count >= 2:
+                        # More patient end detection for server: 3 consecutive stable scrolls
+                        if same_height_count >= 3:
                             logger.info(f"Reached end of search results, total checked: {position}")
                             # This is normal - search results ended, not an error
                             return None
