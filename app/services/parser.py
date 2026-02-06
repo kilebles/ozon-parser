@@ -203,12 +203,11 @@ class OzonParser:
                 options["headless"] = False  # Use flag instead
 
             options["args"] = args
+            # User-Agent должен соответствовать реальной версии Chromium
+            # Playwright bundled Chromium ~133-134, но лучше использовать 131 (стабильный Chrome)
+            # Важно: на Linux сервере лучше притворяться Windows - меньше подозрений
             options["user_agent"] = (
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-                if platform.system() == "Linux"
-                else "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/131.0.0.0 Safari/537.36"
             )
@@ -390,10 +389,10 @@ class OzonParser:
                 Date.prototype.getTimezoneOffset = function() { return moscowOffset; };
             """)
         else:
-            # Chromium stealth
+            # Chromium stealth - always pretend to be Windows for consistency
             stealth = Stealth(
                 navigator_languages_override=("ru-RU", "ru"),
-                navigator_platform_override="Linux x86_64" if platform.system() == "Linux" else "MacIntel",
+                navigator_platform_override="Win32",  # Windows - less suspicious than Linux
             )
             await stealth.apply_stealth_async(page)
 
