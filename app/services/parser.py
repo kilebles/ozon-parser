@@ -877,7 +877,8 @@ class OzonParser:
         self, query: str, target_article: str, max_position: int = 1000, page: Page | None = None
     ) -> int | None:
         """
-        Search for a product position in Ozon search results using infinite scroll.
+        Search for a product position in Ozon search results.
+        Uses pagination (page=N) which works more reliably on servers.
         Returns the position (1-based) or None if not found within max_position.
         """
         logger.info(f"{'='*60}")
@@ -891,10 +892,14 @@ class OzonParser:
 
         seen_products: set[str] = set()
         position = 0
-        scroll_count = 0
+        page_num = 1
+        products_per_page = 36  # Ozon typically shows 36 per page
+        max_pages = (max_position // products_per_page) + 2
 
         try:
-            search_url = f"{settings.base_url}/search/?text={query}"
+            # Use pagination instead of infinite scroll (works better on servers)
+            base_search_url = f"{settings.base_url}/search/?text={query}"
+            search_url = base_search_url
             logger.debug(f"Opening URL: {search_url}")
             try:
                 await page.goto(search_url, wait_until="domcontentloaded")
@@ -935,9 +940,10 @@ class OzonParser:
                 if not await self._handle_block_page(page):
                     raise OzonBlockedError("block_restart")
 
-            # Collect initial products
+            # Collect products from first page
             new_products = await self._collect_products_from_page(page, seen_products)
-            logger.info(f"Initial load: found {len(new_products)} products")
+            initial_count = len(new_products)
+            logger.info(f"Page {page_num}: found {initial_count} products")
 
             for product_id in new_products:
                 position += 1
@@ -945,109 +951,110 @@ class OzonParser:
                     logger.info(f"Found article {target_article} at position {position}")
                     return position
 
-            # Scroll and load more products
-            no_new_products_count = 0
-            max_no_new_products = 6  # Allow more empty scrolls (server is slower)
-            same_height_count = 0  # Track consecutive same-height scrolls
+            # Check if infinite scroll works (products > 30 usually means it works)
+            # Try one scroll to see if more products load
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1500)
+            scroll_products = await self._collect_products_from_page(page, seen_products)
 
-            while position < max_position:
-                scroll_count += 1
+            use_pagination = len(scroll_products) == 0  # No new products = pagination mode
 
-                # More gradual scroll to trigger lazy loading properly
-                # Scroll by viewport height instead of jumping to bottom
-                prev_height = await page.evaluate("""
-                    () => {
-                        const h = document.body.scrollHeight;
-                        const viewportHeight = window.innerHeight;
-                        const currentScroll = window.scrollY;
-                        // Scroll down by ~80% of viewport height (more natural)
-                        const newScroll = Math.min(currentScroll + viewportHeight * 0.8, h);
-                        window.scrollTo({ top: newScroll, behavior: 'instant' });
-                        return h;
-                    }
-                """)
+            if use_pagination:
+                logger.info("Infinite scroll disabled, switching to pagination mode")
 
-                # Wait for content to load - longer timeout for server environment
-                new_products = []
-                for wait_attempt in range(6):  # Up to 3 seconds total
-                    await page.wait_for_timeout(500)
+            # Pagination loop
+            empty_pages = 0
+            max_empty_pages = 2
 
-                    # Check for new products (fast JS extraction)
-                    new_products = await self._collect_products_from_page(page, set(seen_products))
-                    if new_products:
-                        break
+            while position < max_position and page_num < max_pages:
+                if use_pagination:
+                    # Navigate to next page
+                    page_num += 1
+                    search_url = f"{base_search_url}&page={page_num}"
+                    logger.debug(f"Opening page {page_num}: {search_url}")
 
-                    # Check if page height changed - still loading
-                    current_height = await page.evaluate("document.body.scrollHeight")
-                    if current_height > prev_height:
-                        # Page is growing, keep waiting
+                    try:
+                        await page.goto(search_url, wait_until="domcontentloaded")
+                    except Exception as e:
+                        if "Timeout" in str(e):
+                            logger.warning(f"Page {page_num} timeout, trying to continue...")
+                        else:
+                            raise
+
+                    # Human-like delay
+                    await page.wait_for_timeout(random.randint(300, 700))
+                    await page.mouse.move(random.randint(400, 800), random.randint(200, 400))
+
+                    # Check for captcha/block
+                    is_captcha, is_blocked = await self._check_page_status(page)
+                    if is_captcha:
+                        await self._wait_for_captcha(page)
+                    if is_blocked:
+                        if not await self._handle_block_page(page):
+                            logger.error("Blocked during pagination")
+                            return -1
+
+                    # Wait for products
+                    try:
+                        await page.wait_for_selector("a[href*='/product/']", timeout=10000)
+                    except Exception:
+                        logger.warning(f"No products on page {page_num}")
+                        empty_pages += 1
+                        if empty_pages >= max_empty_pages:
+                            logger.info(f"Reached end of results at page {page_num}")
+                            return None
                         continue
-                    if wait_attempt >= 2:
-                        # Height stable for 1+ second and no new products
-                        # Try to trigger lazy load explicitly
-                        await page.evaluate("""
-                            () => {
-                                // Dispatch scroll event to trigger observers
-                                window.dispatchEvent(new Event('scroll'));
-                                // Also try scrolling a tiny bit more
-                                window.scrollBy(0, 100);
-                            }
-                        """)
 
-                # Check captcha/block only if no products after waiting
-                if not new_products:
+                    new_products = await self._collect_products_from_page(page, seen_products)
+                else:
+                    # Infinite scroll mode (for local/residential IPs)
+                    await page.evaluate("""
+                        () => {
+                            const h = document.body.scrollHeight;
+                            window.scrollTo(0, h);
+                        }
+                    """)
+                    await page.wait_for_timeout(800)
+
+                    # Check for captcha/block
                     is_captcha, is_blocked = await self._check_page_status(page)
                     if is_captcha:
                         await self._wait_for_captcha(page)
                         continue
                     if is_blocked:
                         if not await self._handle_block_page(page):
-                            logger.error("Failed to bypass block page during scroll")
                             return -1
                         continue
 
-                # Collect final products and check height
-                new_products = await self._collect_products_from_page(page, seen_products)
-                current_height = await page.evaluate("document.body.scrollHeight")
+                    new_products = await self._collect_products_from_page(page, seen_products)
+                    page_num += 1  # Count scrolls as "pages" for logging
 
                 if not new_products:
-                    if current_height == prev_height:
-                        same_height_count += 1
-                        # More patient end detection for server: 3 consecutive stable scrolls
-                        if same_height_count >= 3:
-                            logger.info(f"Reached end of search results, total checked: {position}")
-                            # This is normal - search results ended, not an error
-                            return None
-                    else:
-                        same_height_count = 0  # Reset if page grew (banner/footer)
-
-                    no_new_products_count += 1
-                    if no_new_products_count >= max_no_new_products:
-                        logger.info(f"No more products loading, total checked: {position}")
-                        # Normal end of results
+                    empty_pages += 1
+                    if empty_pages >= max_empty_pages:
+                        logger.info(f"No more products, total checked: {position}")
                         return None
                     continue
 
-                no_new_products_count = 0
-                same_height_count = 0
-                logger.debug(f"Scroll #{scroll_count}: +{len(new_products)} products")
+                empty_pages = 0
+                logger.debug(f"Page {page_num}: +{len(new_products)} products (total: {position + len(new_products)})")
 
                 for product_id in new_products:
                     position += 1
                     if product_id == target_article:
                         logger.info(f"FOUND! Article {target_article} at position {position}")
-                        logger.info(f"Total scrolls: {scroll_count}, total products checked: {position}")
+                        logger.info(f"Total pages: {page_num}, total products checked: {position}")
                         return position
                     if position >= max_position:
                         logger.info(f"Reached max position {max_position}, article not found")
                         return None
 
                 if position % 300 == 0:
-                    logger.info(f"Progress: checked {position} products (scroll #{scroll_count})...")
+                    logger.info(f"Progress: checked {position} products (page {page_num})...")
 
             # If we exit the loop normally, article was not found
             logger.info(f"NOT FOUND: Article {target_article} not in top {position} positions")
-            logger.info(f"Total scrolls: {scroll_count}")
+            logger.info(f"Total pages: {page_num}")
             return None
 
         finally:
