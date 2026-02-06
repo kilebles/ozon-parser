@@ -35,5 +35,9 @@ class Settings(BaseSettings):
     # Parallel tabs for parsing (be careful, high values may trigger ban)
     parallel_tabs: int = 1
 
+    # Browser type: chromium, firefox, webkit
+    # Chromium with --headless=new works best for anti-detection
+    browser_type: str = "chromium"
+
 
 settings = Settings()

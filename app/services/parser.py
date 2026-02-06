@@ -20,6 +20,13 @@ from app.settings import settings
 
 logger = get_logger(__name__)
 
+# Firefox user agents for different platforms
+FIREFOX_USER_AGENTS = {
+    "Darwin": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0",
+    "Linux": "Mozilla/5.0 (X11; Linux x86_64; rv:134.0) Gecko/20100101 Firefox/134.0",
+    "Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0",
+}
+
 
 class OzonBlockedError(Exception):
     """Raised when Ozon blocks access and refresh doesn't help."""
@@ -88,48 +95,16 @@ class OzonParser:
         user_data_dir = Path("browser_data")
         user_data_dir.mkdir(exist_ok=True)
 
-        args = [
-            # Anti-detection
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-site-isolation-trials",
-            # Performance & stability
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            # Hide automation
-            "--disable-infobars",
-            "--disable-background-networking",
-            "--disable-breakpad",
-            "--disable-component-update",
-            "--no-first-run",
-            "--no-default-browser-check",
-            # Window size (not default 800x600)
-            "--window-size=1920,1080",
-            "--start-maximized",
-            # Fake GPU to hide server environment
-            "--use-gl=angle",
-            "--use-angle=swiftshader",  # Software rendering but with spoofed name
-            "--enable-webgl",
-        ]
+        is_firefox = settings.browser_type == "firefox"
 
-        # Use new headless mode if enabled (less detectable)
-        if settings.browser_headless and settings.browser_headless_new:
-            args.append("--headless=new")
+        # Slightly randomize viewport to look more human (within common resolutions)
+        viewport_width = random.choice([1920, 1903, 1912, 1920])
+        viewport_height = random.choice([1080, 969, 1040, 1080])
 
         options = dict(
             user_data_dir=str(user_data_dir),
-            headless=settings.browser_headless and not settings.browser_headless_new,
-            args=args,
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-                if platform.system() == "Linux"
-                else "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
+            headless=settings.browser_headless,
+            viewport={"width": viewport_width, "height": viewport_height},
             locale="ru-RU",
             color_scheme="light",
             timezone_id="Europe/Moscow",
@@ -137,15 +112,96 @@ class OzonParser:
             permissions=["geolocation"],
         )
 
+        if is_firefox:
+            # Firefox user agent matching current Firefox version
+            options["user_agent"] = FIREFOX_USER_AGENTS.get(
+                platform.system(), FIREFOX_USER_AGENTS["Linux"]
+            )
+
+            # Firefox-specific preferences for anti-detection
+            options["firefox_user_prefs"] = {
+                # Disable webdriver detection
+                "dom.webdriver.enabled": False,
+                "useAutomationExtension": False,
+                # Privacy and fingerprint resistance (but not too aggressive)
+                "privacy.resistFingerprinting": False,  # True breaks many sites
+                "privacy.trackingprotection.enabled": False,
+                # Disable telemetry
+                "toolkit.telemetry.enabled": False,
+                "datareporting.healthreport.uploadEnabled": False,
+                # WebGL - keep enabled for fingerprint consistency
+                "webgl.disabled": False,
+                # Media settings (look like real browser)
+                "media.peerconnection.enabled": True,
+                "media.navigator.enabled": True,
+                # Geolocation
+                "geo.enabled": True,
+                # Performance settings
+                "network.http.pipelining": True,
+                "network.http.proxy.pipelining": True,
+                # Disable safe browsing (faster, less detectable)
+                "browser.safebrowsing.enabled": False,
+                "browser.safebrowsing.malware.enabled": False,
+                # Canvas - allow for consistent fingerprint
+                "canvas.poisondata": False,
+                # Disable devtools detection
+                "devtools.selfxss.count": 100,
+            }
+        else:
+            # Chromium args
+            args = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-site-isolation-trials",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--disable-background-networking",
+                "--disable-breakpad",
+                "--disable-component-update",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--window-size=1920,1080",
+                "--start-maximized",
+                "--use-gl=angle",
+                "--use-angle=swiftshader",
+                "--enable-webgl",
+            ]
+            if settings.browser_headless and settings.browser_headless_new:
+                args.append("--headless=new")
+                options["headless"] = False  # Use flag instead
+
+            options["args"] = args
+            options["user_agent"] = (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+                if platform.system() == "Linux"
+                else "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            )
+
         proxy = self._get_next_proxy()
         if proxy:
             options["proxy"] = proxy
 
         return options
 
+    def _get_browser_type(self):
+        """Get browser type based on settings."""
+        if not self._playwright:
+            raise RuntimeError("Playwright not initialized")
+        browser_map = {
+            "chromium": self._playwright.chromium,
+            "firefox": self._playwright.firefox,
+            "webkit": self._playwright.webkit,
+        }
+        return browser_map.get(settings.browser_type, self._playwright.chromium)
+
     async def __aenter__(self) -> "OzonParser":
         self._playwright = await async_playwright().start()
-        self._context = await self._playwright.chromium.launch_persistent_context(
+        self._context = await self._get_browser_type().launch_persistent_context(
             **self._build_launch_options()
         )
         return self
@@ -183,7 +239,7 @@ class OzonParser:
             if not self._playwright:
                 self._playwright = await async_playwright().start()
 
-            self._context = await self._playwright.chromium.launch_persistent_context(
+            self._context = await self._get_browser_type().launch_persistent_context(
                 **self._build_launch_options()
             )
             logger.info("Browser restarted with clean profile")
@@ -215,54 +271,142 @@ class OzonParser:
 
             await page.route("**/*", handle_route)
 
-        # Apply stealth mode (hides webdriver, fixes fingerprints, etc.)
-        stealth = Stealth(
-            navigator_languages_override=("ru-RU", "ru"),
-            navigator_platform_override="Linux x86_64" if platform.system() == "Linux" else "MacIntel",
-        )
-        await stealth.apply_stealth_async(page)
+        is_firefox = settings.browser_type == "firefox"
 
-        # Spoof WebGL to hide server environment (no real GPU)
-        await page.add_init_script("""
-            // Fake WebGL renderer to look like real desktop GPU
-            const getParameterProxyHandler = {
-                apply: function(target, thisArg, args) {
-                    const param = args[0];
-                    // UNMASKED_VENDOR_WEBGL
-                    if (param === 37445) {
-                        return 'Google Inc. (NVIDIA)';
-                    }
-                    // UNMASKED_RENDERER_WEBGL
-                    if (param === 37446) {
-                        return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-                    }
-                    return Reflect.apply(target, thisArg, args);
+        if is_firefox:
+            # Firefox-specific stealth script
+            await page.add_init_script("""
+                // Hide webdriver property
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                    configurable: true
+                });
+
+                // Firefox doesn't have these Chrome-specific properties
+                delete window.chrome;
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+
+                // Consistent navigator properties for Firefox
+                const platform = navigator.userAgent.includes('Mac') ? 'MacIntel' :
+                                navigator.userAgent.includes('Windows') ? 'Win32' : 'Linux x86_64';
+                Object.defineProperty(navigator, 'platform', { get: () => platform });
+
+                // Firefox typical hardware values
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                // Note: Firefox doesn't expose deviceMemory
+
+                // Screen properties
+                Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+                Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+
+                // Firefox-specific: override Notification permission check
+                const originalQuery = window.Notification && Notification.requestPermission;
+                if (originalQuery) {
+                    Notification.requestPermission = function() {
+                        return Promise.resolve('default');
+                    };
                 }
-            };
 
-            // Apply to both WebGL contexts
-            ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(ctx => {
-                if (window[ctx]) {
-                    const proto = window[ctx].prototype;
-                    const originalGetParameter = proto.getParameter;
-                    proto.getParameter = new Proxy(originalGetParameter, getParameterProxyHandler);
+                // Plugins array (Firefox shows empty by default in privacy mode)
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => {
+                        const plugins = [];
+                        plugins.length = 0;
+                        return plugins;
+                    }
+                });
+
+                // Firefox doesn't leak automation through permissions API
+                if (navigator.permissions) {
+                    const originalQuery = navigator.permissions.query;
+                    navigator.permissions.query = (parameters) => {
+                        if (parameters.name === 'notifications') {
+                            return Promise.resolve({ state: 'prompt', onchange: null });
+                        }
+                        return originalQuery.call(navigator.permissions, parameters);
+                    };
                 }
-            });
 
-            // Spoof hardware concurrency (CPU cores) - servers often have many cores
-            Object.defineProperty(navigator, 'hardwareConcurrency', {
-                get: () => 8  // Typical desktop
-            });
+                // Consistent WebGL for Firefox
+                const getParameterProxyHandler = {
+                    apply: function(target, thisArg, args) {
+                        const param = args[0];
+                        // UNMASKED_VENDOR_WEBGL
+                        if (param === 37445) {
+                            return 'Mozilla';
+                        }
+                        // UNMASKED_RENDERER_WEBGL - Firefox shows different format
+                        if (param === 37446) {
+                            return 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
+                        }
+                        return Reflect.apply(target, thisArg, args);
+                    }
+                };
 
-            // Spoof device memory
-            Object.defineProperty(navigator, 'deviceMemory', {
-                get: () => 8  // 8GB typical desktop
-            });
+                ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(ctx => {
+                    if (window[ctx]) {
+                        const proto = window[ctx].prototype;
+                        const originalGetParameter = proto.getParameter;
+                        proto.getParameter = new Proxy(originalGetParameter, getParameterProxyHandler);
+                    }
+                });
 
-            // Hide that we're running without a real screen
-            Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-            Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
-        """)
+                // Override Date to use Moscow timezone consistently
+                const originalDate = Date;
+                const moscowOffset = -180; // UTC+3 in minutes (negative because getTimezoneOffset returns inverted)
+                Date.prototype.getTimezoneOffset = function() { return moscowOffset; };
+            """)
+        else:
+            # Chromium stealth
+            stealth = Stealth(
+                navigator_languages_override=("ru-RU", "ru"),
+                navigator_platform_override="Linux x86_64" if platform.system() == "Linux" else "MacIntel",
+            )
+            await stealth.apply_stealth_async(page)
+
+            # Spoof WebGL to hide server environment (no real GPU)
+            await page.add_init_script("""
+                // Fake WebGL renderer to look like real desktop GPU
+                const getParameterProxyHandler = {
+                    apply: function(target, thisArg, args) {
+                        const param = args[0];
+                        // UNMASKED_VENDOR_WEBGL
+                        if (param === 37445) {
+                            return 'Google Inc. (NVIDIA)';
+                        }
+                        // UNMASKED_RENDERER_WEBGL
+                        if (param === 37446) {
+                            return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                        }
+                        return Reflect.apply(target, thisArg, args);
+                    }
+                };
+
+                // Apply to both WebGL contexts
+                ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(ctx => {
+                    if (window[ctx]) {
+                        const proto = window[ctx].prototype;
+                        const originalGetParameter = proto.getParameter;
+                        proto.getParameter = new Proxy(originalGetParameter, getParameterProxyHandler);
+                    }
+                });
+
+                // Spoof hardware concurrency (CPU cores) - servers often have many cores
+                Object.defineProperty(navigator, 'hardwareConcurrency', {
+                    get: () => 8  // Typical desktop
+                });
+
+                // Spoof device memory
+                Object.defineProperty(navigator, 'deviceMemory', {
+                    get: () => 8  // 8GB typical desktop
+                });
+
+                // Hide that we're running without a real screen
+                Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+                Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+            """)
 
         return page
 
@@ -599,13 +743,15 @@ class OzonParser:
             while position < max_position:
                 scroll_count += 1
 
-                # Scroll and get height in one call
-                prev_height = await page.evaluate("""
-                    () => {
+                # Human-like scroll: slight randomization in scroll distance (no delay added)
+                scroll_variance = random.randint(-50, 100)
+                prev_height = await page.evaluate(f"""
+                    () => {{
                         const h = document.body.scrollHeight;
-                        window.scrollTo(0, h);
+                        // Scroll to near-bottom with small variance to look human
+                        window.scrollTo(0, h + {scroll_variance});
                         return h;
-                    }
+                    }}
                 """)
 
                 # Wait for content to load with adaptive timing
