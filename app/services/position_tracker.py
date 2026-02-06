@@ -261,65 +261,94 @@ class PositionTracker:
             result = chr(65 + remainder) + result
         return result
 
-    def consolidate_yesterday(self) -> bool:
+    def create_daily_summary(self, date_str: str | None = None) -> bool:
         """
-        Consolidate yesterday's hourly columns into a single daily column.
-        Called by scheduler at 12:00.
+        Create a summary column with daily averages at column D.
+        Does NOT delete hourly columns - just adds a new summary column.
+        Summary column has blue background and header format "DD.MM (итог)".
 
-        Returns:
-            True if consolidation was performed, False otherwise.
-        """
-        worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%d.%m")
-        logger.info(f"Running daily consolidation for yesterday ({yesterday})")
-        return self.consolidate_daily_results(worksheet, yesterday)
-
-    def consolidate_old_hourly_columns(self, min_columns: int = 3) -> int:
-        """
-        Find and consolidate all dates that have more than min_columns hourly columns.
-        Called at startup to clean up old data.
+        Called by scheduler at 11:00.
 
         Args:
-            min_columns: Minimum hourly columns to trigger consolidation (default 3)
+            date_str: Date to summarize in "DD.MM" format. If None, uses yesterday.
 
         Returns:
-            Number of dates consolidated.
+            True if summary was created, False otherwise.
         """
         worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
         headers = worksheet.row_values(1)
 
-        # Find all unique dates with hourly columns
-        # Pattern: "DD.MM HH:MM" (1 or 2 digit hour)
-        hourly_pattern = re.compile(r"^(\d{2}\.\d{2}) \d{1,2}:\d{2}$")
-        dates_with_hours: dict[str, int] = {}
+        if date_str is None:
+            # Use yesterday by default (summary at 11:00 is for previous day)
+            date_str = (datetime.now() - timedelta(days=1)).strftime("%d.%m")
 
-        for header in headers:
-            match = hourly_pattern.match(header)
-            if match:
-                date_str = match.group(1)
-                dates_with_hours[date_str] = dates_with_hours.get(date_str, 0) + 1
+        # Check if summary already exists
+        summary_header = f"{date_str} (итог)"
+        if summary_header in headers:
+            logger.info(f"Summary column '{summary_header}' already exists, skipping")
+            return False
 
-        # Filter dates with enough hourly columns
-        dates_to_consolidate = [
-            date_str for date_str, count in dates_with_hours.items()
-            if count >= min_columns
-        ]
+        hourly_columns = self._get_hourly_columns_for_date(headers, date_str)
 
-        if not dates_to_consolidate:
-            logger.info("No dates with enough hourly columns to consolidate")
-            return 0
+        if len(hourly_columns) < 1:
+            logger.info(f"No hourly columns found for {date_str}, skipping summary")
+            return False
 
-        logger.info(f"Found {len(dates_to_consolidate)} dates to consolidate: {dates_to_consolidate}")
+        logger.info(f"Creating summary for {date_str} from {len(hourly_columns)} hourly columns")
 
-        consolidated = 0
-        for date_str in dates_to_consolidate:
-            # Re-fetch worksheet to get updated headers after each consolidation
-            worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
-            if self.consolidate_daily_results(worksheet, date_str):
-                consolidated += 1
+        # Get all data
+        all_data = worksheet.get_all_values()
+        num_rows = len(all_data)
 
-        logger.info(f"Consolidated {consolidated} dates at startup")
-        return consolidated
+        # Calculate averages for each row
+        averages = []
+        for row_idx in range(1, num_rows):  # Skip header
+            values = []
+            for col_idx in hourly_columns:
+                if col_idx <= len(all_data[row_idx]):
+                    cell_value = all_data[row_idx][col_idx - 1]
+                    if cell_value:
+                        if cell_value.endswith("+"):
+                            values.append(1000)
+                        else:
+                            try:
+                                values.append(int(cell_value))
+                            except ValueError:
+                                pass
+
+            if values:
+                avg = sum(values) / len(values)
+                if avg >= 1000:
+                    averages.append("1000+")
+                else:
+                    averages.append(str(round(avg)))
+            else:
+                averages.append("")
+
+        # Insert new column at position D (index 4)
+        worksheet.insert_cols([[""]], col=4)
+        worksheet.update_cell(1, 4, summary_header)
+
+        # Write averages
+        if averages:
+            cells_to_update = []
+            for row_idx, avg in enumerate(averages, start=2):
+                cells_to_update.append({
+                    'range': f'D{row_idx}',
+                    'values': [[avg]]
+                })
+
+            # Batch update in chunks
+            for i in range(0, len(cells_to_update), 100):
+                chunk = cells_to_update[i:i+100]
+                worksheet.batch_update(chunk)
+
+        # Apply blue background to entire summary column
+        blue_color = {"red": 0.7, "green": 0.85, "blue": 1.0}  # Light blue
+        worksheet.format(f"D1:D{num_rows}", {"backgroundColor": blue_color})
+
+        logger.info(f"Created summary column '{summary_header}' with blue background")
+        return True
 
     async def _write_cell_async(
         self, worksheet, row: int, col: int, value: str, is_found: bool = False

@@ -38,12 +38,6 @@ async def run_tracker() -> None:
     sheets = GoogleSheetsService()
     sheets.connect()
 
-    # Consolidate old hourly columns at startup (if >= 3 hourly columns for a date)
-    tracker_for_consolidation = PositionTracker(sheets, parser=None)  # type: ignore
-    consolidated = tracker_for_consolidation.consolidate_old_hourly_columns(min_columns=3)
-    if consolidated > 0:
-        logger.info(f"Consolidated {consolidated} dates at startup")
-
     captcha_solver = create_captcha_solver()
 
     try:
@@ -66,24 +60,23 @@ def job() -> None:
     asyncio.run(run_tracker())
 
 
-def consolidation_job() -> None:
+def daily_summary_job() -> None:
     """
-    Consolidate yesterday's hourly columns into a single daily column.
-    Runs at 12:00 daily.
+    Create daily summary column with averages.
+    Runs at 11:00 daily. Creates a new summary column at D with blue background.
     """
-    logger.info("Starting daily consolidation job...")
+    logger.info("Starting daily summary job...")
 
     sheets = GoogleSheetsService()
     sheets.connect()
 
-    # Create a minimal tracker just for consolidation (no parser needed)
     tracker = PositionTracker(sheets, parser=None)  # type: ignore
-    result = tracker.consolidate_yesterday()
+    result = tracker.create_daily_summary()
 
     if result:
-        logger.info("Daily consolidation completed successfully")
+        logger.info("Daily summary created successfully")
     else:
-        logger.info("No consolidation needed")
+        logger.info("No summary needed")
 
 
 
@@ -94,11 +87,11 @@ if __name__ == "__main__":
     # Run once immediately on start
     if "--once" in sys.argv:
         job()
-    elif "--consolidate" in sys.argv:
-        # Run yesterday's consolidation manually
-        consolidation_job()
+    elif "--summary" in sys.argv:
+        # Create daily summary manually
+        daily_summary_job()
     else:
-        logger.info("Starting scheduler (tracking: every 2 hours, consolidation: 12:00)")
+        logger.info("Starting scheduler (tracking: every 2 hours, daily summary: 11:00)")
         # Run immediately, then at fixed hours
         job()
 
@@ -112,12 +105,12 @@ if __name__ == "__main__":
             id="position_tracking",
         )
 
-        # Daily consolidation job - at 12:00
+        # Daily summary job - at 11:00 (creates summary column before new day's tracking)
         scheduler.add_job(
-            consolidation_job,
-            CronTrigger(hour=12, minute=0),
+            daily_summary_job,
+            CronTrigger(hour=11, minute=0),
             max_instances=1,
-            id="daily_consolidation",
+            id="daily_summary",
         )
 
         try:
