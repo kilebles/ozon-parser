@@ -676,38 +676,32 @@ class OzonParser:
 
             # Infinite scroll loop
             empty_scrolls = 0
-            max_empty_scrolls = 3
+            max_empty_scrolls = 5
 
             while position < max_position:
-                # Scroll using multiple methods for better compatibility
-                # Method 1: Smooth scroll with wheel event (triggers Intersection Observer)
-                await page.evaluate("""
-                    () => {
-                        // Dispatch wheel event to trigger lazy loading
-                        const event = new WheelEvent('wheel', {
-                            deltaY: 1000,
-                            bubbles: true
-                        });
-                        document.dispatchEvent(event);
-
-                        // Scroll to bottom
-                        window.scrollTo({
-                            top: document.body.scrollHeight,
-                            behavior: 'smooth'
-                        });
-                    }
-                """)
-                await page.wait_for_timeout(random.randint(800, 1200))
-
-                # Method 2: Additional scroll event dispatch
-                await page.evaluate("""
-                    () => {
-                        window.dispatchEvent(new Event('scroll'));
-                        document.dispatchEvent(new Event('scroll'));
-                    }
-                """)
-                await page.wait_for_timeout(random.randint(300, 500))
                 scroll_count += 1
+
+                # Human-like scroll behavior
+                # 1. Random mouse movement before scroll
+                await page.mouse.move(
+                    random.randint(300, 900),
+                    random.randint(200, 500)
+                )
+                await page.wait_for_timeout(random.randint(100, 300))
+
+                # 2. Scroll with mouse wheel (more natural than scrollTo)
+                scroll_amount = random.randint(600, 1000)
+                await page.mouse.wheel(0, scroll_amount)
+                await page.wait_for_timeout(random.randint(400, 800))
+
+                # 3. Sometimes do a small additional scroll
+                if random.random() < 0.3:
+                    await page.mouse.wheel(0, random.randint(100, 300))
+                    await page.wait_for_timeout(random.randint(200, 400))
+
+                # 4. Random pause sometimes (like reading)
+                if random.random() < 0.1:
+                    await page.wait_for_timeout(random.randint(1000, 2000))
 
                 # Check for captcha/block
                 is_captcha, is_blocked = await self._check_page_status(page)
@@ -723,20 +717,7 @@ class OzonParser:
 
                 if not new_products:
                     empty_scrolls += 1
-                    # Log current page height for debugging
-                    page_height = await page.evaluate("document.body.scrollHeight")
-                    scroll_pos = await page.evaluate("window.scrollY")
-                    logger.debug(f"Empty scroll {empty_scrolls}/{max_empty_scrolls}, height={page_height}, pos={scroll_pos}")
-
-                    # Try alternative scroll method on empty scrolls
-                    if empty_scrolls == 1:
-                        # Try keyboard scroll (End key)
-                        await page.keyboard.press("End")
-                        await page.wait_for_timeout(500)
-                    elif empty_scrolls == 2:
-                        # Try mouse wheel scroll
-                        await page.mouse.wheel(0, 3000)
-                        await page.wait_for_timeout(500)
+                    logger.debug(f"Empty scroll {empty_scrolls}/{max_empty_scrolls}")
 
                     if empty_scrolls >= max_empty_scrolls:
                         logger.info(f"No more products after {scroll_count} scrolls, total checked: {position}")
