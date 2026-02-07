@@ -7,8 +7,6 @@ Supports:
 """
 
 import asyncio
-import base64
-from enum import Enum
 
 import httpx
 
@@ -16,11 +14,6 @@ from app.logging_config import get_logger
 from app.settings import settings
 
 logger = get_logger(__name__)
-
-
-class CaptchaType(Enum):
-    RECAPTCHA_V2 = "recaptcha_v2"
-    IMAGE = "image"
 
 
 class CaptchaSolverError(Exception):

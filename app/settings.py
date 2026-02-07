@@ -26,22 +26,8 @@ class Settings(BaseSettings):
     # Telegram notifications
     bot_token: str = ""
 
-    # Proxy list (comma-separated, format: user:pass@host:port)
-    proxy_list: str = ""
-
-    # Single proxy server (e.g., "http://127.0.0.1:8888")
-    proxy_server: str = ""
-
     # Parallel tabs for parsing (be careful, high values may trigger ban)
     parallel_tabs: int = 1
-
-    # Browser type: chromium, firefox, webkit
-    # Chromium with --headless=new works best for anti-detection
-    browser_type: str = "chromium"
-
-    # Force pagination mode instead of infinite scroll
-    # Use this if infinite scroll doesn't work (e.g., on Windows or with certain IPs)
-    force_pagination: bool = False
 
 
 settings = Settings()
