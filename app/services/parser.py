@@ -11,7 +11,6 @@ from playwright.async_api import (
 )
 from playwright_stealth import Stealth
 from app.logging_config import get_logger
-from app.services.captcha import RuCaptchaSolver, CaptchaSolverError
 from app.settings import settings
 
 logger = get_logger(__name__)
@@ -28,10 +27,9 @@ class OzonPageLoadError(Exception):
 
 
 class OzonParser:
-    def __init__(self, captcha_solver: RuCaptchaSolver | None = None) -> None:
+    def __init__(self) -> None:
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
-        self._captcha_solver = captcha_solver
         self._restart_lock: asyncio.Lock | None = None
 
     def _get_lock(self) -> asyncio.Lock:
@@ -468,19 +466,8 @@ class OzonParser:
             return False, False
 
     async def _wait_for_captcha(self, page: Page) -> None:
-        """Attempt to solve captcha automatically via RuCaptcha, fallback to manual."""
+        """Wait for manual captcha/challenge solving."""
         logger.warning("Captcha/challenge detected!")
-
-        # Try automatic solving if captcha solver is configured
-        if self._captcha_solver:
-            try:
-                solved = await self._solve_captcha_auto(page)
-                if solved:
-                    return
-            except CaptchaSolverError as e:
-                logger.warning(f"Automatic captcha solving failed: {e}")
-
-        # Fallback to manual solving
         logger.warning("Please solve captcha manually in the browser window...")
         logger.info("You have 60 seconds to solve the captcha")
         for _ in range(60):
@@ -489,105 +476,6 @@ class OzonParser:
                 return
             await page.wait_for_timeout(1000)
         logger.warning("Captcha timeout - proceeding anyway...")
-
-    async def _solve_captcha_auto(self, page: Page) -> bool:
-        """Attempt to solve captcha automatically using RuCaptcha."""
-        if not self._captcha_solver:
-            return False
-
-        page_url = page.url
-
-        # Try Cloudflare Turnstile
-        turnstile_element = await page.query_selector(
-            "[data-sitekey].cf-turnstile, .cf-turnstile[data-sitekey], "
-            "iframe[src*='challenges.cloudflare.com']"
-        )
-        if turnstile_element:
-            site_key = await turnstile_element.get_attribute("data-sitekey")
-            if not site_key:
-                parent = await page.query_selector(".cf-turnstile[data-sitekey]")
-                if parent:
-                    site_key = await parent.get_attribute("data-sitekey")
-
-            if site_key:
-                logger.info(f"Found Cloudflare Turnstile with sitekey: {site_key[:20]}...")
-                token = await self._captcha_solver.solve_turnstile(
-                    site_key=site_key, page_url=page_url,
-                )
-                await page.evaluate("""
-                    (token) => {
-                        const input = document.querySelector('[name="cf-turnstile-response"]');
-                        if (input) input.value = token;
-                        const form = document.querySelector('form');
-                        if (form) form.submit();
-                    }
-                """, token)
-                await page.wait_for_timeout(3000)
-                if not await self._is_captcha_page(page):
-                    logger.info("Turnstile solved successfully!")
-                    return True
-
-        # Try reCAPTCHA
-        recaptcha_element = await page.query_selector("[data-sitekey]")
-        if recaptcha_element:
-            site_key = await recaptcha_element.get_attribute("data-sitekey")
-            if site_key:
-                logger.info(f"Found reCAPTCHA v2 with sitekey: {site_key[:20]}...")
-                size = await recaptcha_element.get_attribute("data-size")
-                token = await self._captcha_solver.solve_recaptcha_v2(
-                    site_key=site_key, page_url=page_url, invisible=size == "invisible",
-                )
-                await page.evaluate("""
-                    (token) => {
-                        const textarea = document.querySelector('#g-recaptcha-response');
-                        if (textarea) { textarea.value = token; textarea.style.display = 'block'; }
-                        const hidden = document.querySelector('[name="g-recaptcha-response"]');
-                        if (hidden) hidden.value = token;
-                    }
-                """, token)
-                submit = await page.query_selector(
-                    "button[type='submit'], input[type='submit'], button:has-text('Подтвердить')"
-                )
-                if submit:
-                    await submit.click()
-                    await page.wait_for_timeout(3000)
-                if not await self._is_captcha_page(page):
-                    logger.info("reCAPTCHA solved successfully!")
-                    return True
-
-        # Try image captcha
-        captcha_image = await page.query_selector(
-            "img[src*='captcha'], img[alt*='captcha'], .captcha-image img"
-        )
-        if captcha_image:
-            logger.info("Found image captcha")
-            src = await captcha_image.get_attribute("src")
-            if src and src.startswith("data:image"):
-                image_base64 = src.split(",")[1]
-            else:
-                import base64
-                image_bytes = await captcha_image.screenshot()
-                image_base64 = base64.b64encode(image_bytes).decode()
-
-            text = await self._captcha_solver.solve_image_captcha(image_base64)
-            logger.info(f"Image captcha solved: {text}")
-            captcha_input = await page.query_selector(
-                "input[name*='captcha'], input[id*='captcha'], input[placeholder*='код'], input[type='text']"
-            )
-            if captcha_input:
-                await captcha_input.fill(text)
-                submit = await page.query_selector(
-                    "button[type='submit'], input[type='submit'], button:has-text('Подтвердить')"
-                )
-                if submit:
-                    await submit.click()
-                    await page.wait_for_timeout(3000)
-                if not await self._is_captcha_page(page):
-                    logger.info("Image captcha solved successfully!")
-                    return True
-
-        logger.warning("Unknown captcha type, cannot solve automatically")
-        return False
 
     async def _handle_block_page(self, page: Page, max_retries: int = 3) -> bool:
         """
@@ -746,9 +634,34 @@ class OzonParser:
             max_empty_scrolls = 3
 
             while position < max_position:
-                # Scroll to bottom
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(random.randint(700, 1000))
+                # Scroll using multiple methods for better compatibility
+                # Method 1: Smooth scroll with wheel event (triggers Intersection Observer)
+                await page.evaluate("""
+                    () => {
+                        // Dispatch wheel event to trigger lazy loading
+                        const event = new WheelEvent('wheel', {
+                            deltaY: 1000,
+                            bubbles: true
+                        });
+                        document.dispatchEvent(event);
+
+                        // Scroll to bottom
+                        window.scrollTo({
+                            top: document.body.scrollHeight,
+                            behavior: 'smooth'
+                        });
+                    }
+                """)
+                await page.wait_for_timeout(random.randint(800, 1200))
+
+                # Method 2: Additional scroll event dispatch
+                await page.evaluate("""
+                    () => {
+                        window.dispatchEvent(new Event('scroll'));
+                        document.dispatchEvent(new Event('scroll'));
+                    }
+                """)
+                await page.wait_for_timeout(random.randint(300, 500))
                 scroll_count += 1
 
                 # Check for captcha/block
@@ -765,6 +678,21 @@ class OzonParser:
 
                 if not new_products:
                     empty_scrolls += 1
+                    # Log current page height for debugging
+                    page_height = await page.evaluate("document.body.scrollHeight")
+                    scroll_pos = await page.evaluate("window.scrollY")
+                    logger.debug(f"Empty scroll {empty_scrolls}/{max_empty_scrolls}, height={page_height}, pos={scroll_pos}")
+
+                    # Try alternative scroll method on empty scrolls
+                    if empty_scrolls == 1:
+                        # Try keyboard scroll (End key)
+                        await page.keyboard.press("End")
+                        await page.wait_for_timeout(500)
+                    elif empty_scrolls == 2:
+                        # Try mouse wheel scroll
+                        await page.mouse.wheel(0, 3000)
+                        await page.wait_for_timeout(500)
+
                     if empty_scrolls >= max_empty_scrolls:
                         logger.info(f"No more products after {scroll_count} scrolls, total checked: {position}")
                         return None

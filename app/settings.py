@@ -19,10 +19,6 @@ class Settings(BaseSettings):
     google_credentials_path: str = "credentials.json"
     google_spreadsheet_id: str = ""
 
-    # RuCaptcha settings
-    ru_captcha_api_key: str = ""
-    captcha_solve_timeout: int = 120  # Max seconds to wait for captcha solution
-
     # Telegram notifications
     bot_token: str = ""
 

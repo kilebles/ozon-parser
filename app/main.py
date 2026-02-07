@@ -6,29 +6,12 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.logging_config import setup_logging, get_logger
 from app.services import GoogleSheetsService, OzonBlockedError
-from app.services.captcha import RuCaptchaSolver, CaptchaSolverError
 from app.services.parser import OzonParser
 from app.services.position_tracker import PositionTracker
 from app.services.telegram import get_telegram_notifier
-from app.settings import settings
 
 logger = get_logger(__name__)
 telegram = get_telegram_notifier()
-
-
-def create_captcha_solver() -> RuCaptchaSolver | None:
-    """Create captcha solver if API key is configured."""
-    if not settings.ru_captcha_api_key:
-        logger.info("RuCaptcha API key not configured, captcha solving disabled")
-        return None
-
-    try:
-        solver = RuCaptchaSolver()
-        logger.info("RuCaptcha solver initialized")
-        return solver
-    except CaptchaSolverError as e:
-        logger.warning(f"Failed to initialize captcha solver: {e}")
-        return None
 
 
 async def run_tracker() -> None:
@@ -38,10 +21,8 @@ async def run_tracker() -> None:
     sheets = GoogleSheetsService()
     sheets.connect()
 
-    captcha_solver = create_captcha_solver()
-
     try:
-        async with OzonParser(captcha_solver=captcha_solver) as parser:
+        async with OzonParser() as parser:
             tracker = PositionTracker(sheets, parser)
             await tracker.run(max_position=1000)
 
