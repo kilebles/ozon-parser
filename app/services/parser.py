@@ -966,13 +966,21 @@ class OzonParser:
                     logger.info(f"Found article {target_article} at position {position}")
                     return position
 
-            # Check if infinite scroll works (products > 30 usually means it works)
-            # Try one scroll to see if more products load
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(2000)
-            scroll_products = await self._collect_products_from_page(page, seen_products)
-
-            use_pagination = len(scroll_products) == 0  # No new products = pagination mode
+            # Check if infinite scroll works or use forced pagination
+            if settings.force_pagination:
+                use_pagination = True
+                scroll_products = []
+                logger.info("Using forced pagination mode (FORCE_PAGINATION=true)")
+            else:
+                # Try one scroll to see if more products load
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(2000)
+                scroll_products = await self._collect_products_from_page(page, seen_products)
+                use_pagination = len(scroll_products) == 0
+                logger.info(
+                    f"Scroll test: {len(scroll_products)} new products loaded. "
+                    f"Mode: {'pagination' if use_pagination else 'infinite scroll'}"
+                )
 
             # Get actual URL after possible redirect (e.g., /search/ -> /category/)
             current_url = page.url.split('?')[0]  # Base URL without query params
@@ -980,8 +988,8 @@ class OzonParser:
             current_params = page.url.split('?')[1] if '?' in page.url else ''
             current_params = '&'.join(p for p in current_params.split('&') if not p.startswith('page='))
 
-            if use_pagination:
-                logger.info("Infinite scroll disabled, switching to pagination mode")
+            if use_pagination and not settings.force_pagination:
+                logger.info("Infinite scroll disabled by Ozon, switching to pagination mode")
 
             # Add scroll products to position count
             for product_id in scroll_products:

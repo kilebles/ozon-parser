@@ -39,5 +39,9 @@ class Settings(BaseSettings):
     # Chromium with --headless=new works best for anti-detection
     browser_type: str = "chromium"
 
+    # Force pagination mode instead of infinite scroll
+    # Use this if infinite scroll doesn't work (e.g., on Windows or with certain IPs)
+    force_pagination: bool = False
+
 
 settings = Settings()
