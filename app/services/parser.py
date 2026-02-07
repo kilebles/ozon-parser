@@ -172,8 +172,9 @@ class OzonParser:
         page.set_default_timeout(settings.browser_timeout)
 
         # Block heavy resources to speed up loading
+        # NOTE: Do NOT block stylesheet - Ozon needs CSS for proper rendering
         if block_resources:
-            blocked_types = {"image", "stylesheet", "font", "media"}
+            blocked_types = {"image", "font", "media"}
             # Also block tracking/analytics URLs
             blocked_urls = ["mc.yandex", "google-analytics", "facebook", "vk.com/rtrg", "top-fwz", "criteo"]
 
@@ -595,6 +596,40 @@ class OzonParser:
                 else:
                     raise OzonPageLoadError(f"Page load error: {e}")
 
+            # Check for JS challenge (antibot) - wait for it to resolve
+            body_length = await page.evaluate("document.body.innerHTML.length")
+            if body_length < 5000:
+                # Dump what we got for debugging
+                page_info = await page.evaluate("""
+                    () => ({
+                        url: location.href,
+                        title: document.title,
+                        bodyText: document.body.innerText.substring(0, 500),
+                        scripts: document.querySelectorAll('script').length
+                    })
+                """)
+                logger.info(f"Small page ({body_length} chars), waiting for JS... Title: {page_info.get('title')}")
+                logger.debug(f"Page text: {page_info.get('bodyText', '')[:200]}")
+
+                # Wait up to 15 seconds for JS challenge to resolve
+                for i in range(30):
+                    await page.wait_for_timeout(500)
+                    body_length = await page.evaluate("document.body.innerHTML.length")
+                    if body_length > 10000:
+                        logger.info(f"JS challenge resolved after {(i+1)*0.5}s, body: {body_length} chars")
+                        break
+                else:
+                    # Still small - dump current state
+                    final_info = await page.evaluate("""
+                        () => ({
+                            url: location.href,
+                            title: document.title,
+                            bodyLength: document.body.innerHTML.length,
+                            bodyText: document.body.innerText.substring(0, 300)
+                        })
+                    """)
+                    logger.error(f"JS challenge FAILED after 15s. State: {final_info}")
+
             # Human-like behavior: small random delay + mouse movement after page load
             await page.wait_for_timeout(random.randint(300, 800))
             await page.mouse.move(
@@ -602,22 +637,32 @@ class OzonParser:
                 random.randint(200, 400)
             )
 
+            # Check for block/captcha before waiting for products
+            if await self._is_blocked_page(page):
+                logger.warning("Block page detected after load")
+                if not await self._handle_block_page(page):
+                    raise OzonBlockedError("block_restart")
+
+            if await self._is_captcha_page(page):
+                await self._wait_for_captcha(page)
+
             # Wait for products to load
             try:
                 await page.wait_for_selector("a[href*='/product/']", timeout=15000)
                 logger.debug("Products loaded on page")
             except Exception:
-                logger.warning("Timeout waiting for products to appear")
+                # Debug: dump page info
+                debug_info = await page.evaluate("""
+                    () => ({
+                        url: location.href,
+                        title: document.title,
+                        bodyLength: document.body.innerHTML.length,
+                        hasProducts: document.querySelectorAll('a[href*="/product/"]').length,
+                        h1: document.querySelector('h1')?.innerText || 'no h1'
+                    })
+                """)
+                logger.warning(f"No products found. Debug: {debug_info}")
                 raise OzonPageLoadError(f"No products found for query: {query}")
-
-            if await self._is_captcha_page(page):
-                await self._wait_for_captcha(page)
-                await page.wait_for_timeout(500)
-
-            # Handle block page
-            if await self._is_blocked_page(page):
-                if not await self._handle_block_page(page):
-                    raise OzonBlockedError("block_restart")
 
             # Collect products from first page
             new_products = await self._collect_products_from_page(page, seen_products)
