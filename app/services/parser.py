@@ -413,10 +413,8 @@ class OzonParser:
 
     async def _warmup(self, page: Page) -> None:
         """Visit homepage before searching to look like a real user."""
-        logger.info("Warming up: visiting ozon.ru homepage")
         try:
             await page.goto(settings.base_url, wait_until="domcontentloaded")
-            # Human-like: wait a bit and move mouse
             await page.wait_for_timeout(random.randint(500, 1200))
             await page.mouse.move(
                 random.randint(300, 900),
@@ -425,7 +423,6 @@ class OzonParser:
             await page.wait_for_timeout(random.randint(200, 500))
         except Exception:
             await page.wait_for_timeout(500)
-        logger.info("Warmup complete")
 
     async def _is_captcha_page(self, page: Page) -> bool:
         try:
@@ -566,10 +563,7 @@ class OzonParser:
         Search for a product position in Ozon search results using infinite scroll.
         Returns the position (1-based) or None if not found within max_position.
         """
-        logger.info(f"{'='*60}")
-        logger.info(f"Searching position for article {target_article}")
-        logger.info(f"Query: {query}")
-        logger.info(f"{'='*60}")
+        logger.info(f"Search: {query} -> {target_article}")
 
         page_provided = page is not None
         if not page_provided:
@@ -581,7 +575,6 @@ class OzonParser:
 
         try:
             search_url = f"{settings.base_url}/search/?text={query}"
-            logger.debug(f"Opening URL: {search_url}")
             try:
                 await page.goto(search_url, wait_until="domcontentloaded")
             except Exception as e:
@@ -649,7 +642,6 @@ class OzonParser:
             # Wait for products to load
             try:
                 await page.wait_for_selector("a[href*='/product/']", timeout=15000)
-                logger.debug("Products loaded on page")
             except Exception:
                 # Debug: dump page info
                 debug_info = await page.evaluate("""
@@ -666,12 +658,11 @@ class OzonParser:
 
             # Collect products from first page
             new_products = await self._collect_products_from_page(page, seen_products)
-            logger.info(f"Initial load: found {len(new_products)} products")
 
             for product_id in new_products:
                 position += 1
                 if product_id == target_article:
-                    logger.info(f"Found article {target_article} at position {position}")
+                    logger.info(f"Found {target_article} at position {position}")
                     return position
 
             # Infinite scroll loop
@@ -717,32 +708,21 @@ class OzonParser:
 
                 if not new_products:
                     empty_scrolls += 1
-                    logger.debug(f"Empty scroll {empty_scrolls}/{max_empty_scrolls}")
-
                     if empty_scrolls >= max_empty_scrolls:
-                        logger.info(f"No more products after {scroll_count} scrolls, total checked: {position}")
                         return None
                     continue
 
                 empty_scrolls = 0
-                logger.debug(f"Scroll {scroll_count}: +{len(new_products)} products (total: {position + len(new_products)})")
+                logger.debug(f"Scroll {scroll_count}: +{len(new_products)} (total: {position + len(new_products)})")
 
                 for product_id in new_products:
                     position += 1
                     if product_id == target_article:
-                        logger.info(f"FOUND! Article {target_article} at position {position}")
-                        logger.info(f"Total scrolls: {scroll_count}, total products checked: {position}")
+                        logger.info(f"Found {target_article} at position {position}")
                         return position
                     if position >= max_position:
-                        logger.info(f"Reached max position {max_position}, article not found")
                         return None
 
-                if position % 300 == 0:
-                    logger.info(f"Progress: checked {position} products (scroll {scroll_count})...")
-
-            # If we exit the loop normally, article was not found
-            logger.info(f"NOT FOUND: Article {target_article} not in top {position} positions")
-            logger.info(f"Total scrolls: {scroll_count}")
             return None
 
         finally:

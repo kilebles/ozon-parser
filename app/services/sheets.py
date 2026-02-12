@@ -15,9 +15,10 @@ SCOPES = [
 
 
 class GoogleSheetsService:
-    def __init__(self) -> None:
+    def __init__(self, spreadsheet_id: str | None = None) -> None:
         self._client: gspread.Client | None = None
         self._spreadsheet: gspread.Spreadsheet | None = None
+        self._spreadsheet_id = spreadsheet_id
 
     def connect(self) -> None:
         credentials_path = Path(settings.google_credentials_path)
@@ -26,17 +27,14 @@ class GoogleSheetsService:
                 f"Google credentials file not found: {credentials_path}"
             )
 
-        logger.info("Connecting to Google Sheets...")
         credentials = Credentials.from_service_account_file(
             str(credentials_path),
             scopes=SCOPES,
         )
         self._client = gspread.authorize(credentials)
-        logger.info("Successfully authenticated with Google Sheets API")
 
-        if settings.google_spreadsheet_id:
-            self._spreadsheet = self._client.open_by_key(settings.google_spreadsheet_id)
-            logger.info(f"Connected to spreadsheet: {self._spreadsheet.title}")
+        if self._spreadsheet_id:
+            self._spreadsheet = self._client.open_by_key(self._spreadsheet_id)
 
     @property
     def client(self) -> gspread.Client:
@@ -47,8 +45,14 @@ class GoogleSheetsService:
     @property
     def spreadsheet(self) -> gspread.Spreadsheet:
         if not self._spreadsheet:
-            raise RuntimeError("No spreadsheet configured. Set GOOGLE_SPREADSHEET_ID.")
+            raise RuntimeError("No spreadsheet configured.")
         return self._spreadsheet
+
+    @property
+    def spreadsheet_id(self) -> str:
+        if not self._spreadsheet_id:
+            raise RuntimeError("No spreadsheet ID configured.")
+        return self._spreadsheet_id
 
     def get_worksheet(self, name: str) -> gspread.Worksheet:
         return self.spreadsheet.worksheet(name)

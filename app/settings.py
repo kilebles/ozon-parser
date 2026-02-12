@@ -17,13 +17,17 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     google_credentials_path: str = "credentials.json"
-    google_spreadsheet_id: str = ""
+    google_spreadsheet_ids: str = ""  # Comma-separated list of spreadsheet IDs
 
     # Telegram notifications
     bot_token: str = ""
 
-    # Parallel tabs for parsing (be careful, high values may trigger ban)
-    parallel_tabs: int = 1
+    @property
+    def spreadsheet_ids_list(self) -> list[str]:
+        """Parse comma-separated spreadsheet IDs into a list."""
+        if not self.google_spreadsheet_ids:
+            return []
+        return [sid.strip() for sid in self.google_spreadsheet_ids.split(",") if sid.strip()]
 
 
 settings = Settings()

@@ -10,7 +10,6 @@ from app.logging_config import get_logger
 from app.services.parser import OzonParser, OzonBlockedError, OzonPageLoadError
 from app.services.sheets import GoogleSheetsService
 from app.services.telegram import get_telegram_notifier
-from app.settings import settings
 
 logger = get_logger(__name__)
 
@@ -31,6 +30,7 @@ class PositionTracker:
         self.sheets = sheets_service
         self.parser = parser
         self.telegram = get_telegram_notifier()
+        self._short_id: str = ""  # Set in run()
 
     async def _take_screenshot(self, page: Page) -> bytes | None:
         """Take screenshot with fallback methods."""
@@ -112,29 +112,68 @@ class PositionTracker:
                     )
                 )
 
-        logger.info(f"Found {len(tasks)} search tasks")
+        logger.debug(f"Found {len(tasks)} search tasks")
         return tasks
 
-    def get_or_create_hourly_column(self, worksheet) -> int:
+    def get_incomplete_tasks(
+        self, tasks: list[SearchTask], worksheet, col_idx: int
+    ) -> list[SearchTask]:
         """
-        Get or create column for current hour.
-        Format: "28.01 14:00"
-        Returns 1-based column index.
+        Check column and return only tasks that have empty cells.
+        If all cells are filled, returns empty list.
         """
-        now = datetime.now()
-        column_name = now.strftime("%d.%m %H:00")
+        if not tasks:
+            return []
+
+        # Get all values from column
+        col_values = worksheet.col_values(col_idx)
+
+        # Find tasks with empty cells
+        incomplete_tasks = []
+        for task in tasks:
+            row_idx = task.row_index
+            # col_values is 0-indexed, row_index is 1-indexed
+            if row_idx > len(col_values) or not col_values[row_idx - 1].strip():
+                incomplete_tasks.append(task)
+
+        return incomplete_tasks
+
+    def get_column_for_tracking(
+        self, tasks: list[SearchTask], worksheet
+    ) -> tuple[int, list[SearchTask]]:
+        """
+        Determine which column to use and which tasks to process.
+
+        Logic:
+        1. Check if column D has incomplete tasks -> resume them
+        2. If D is complete -> create new column at D, process all tasks
+
+        Returns: (column_index, tasks_to_process)
+        """
         headers = worksheet.row_values(1)
 
-        # Check if column already exists at position D
-        if len(headers) >= 4 and headers[3] == column_name:
-            logger.info(f"Column '{column_name}' already exists at position D")
-            return 4
+        # Check if column D exists and has a date header (not A/B/C fixed columns)
+        if len(headers) >= 4:
+            header_d = headers[3]
+            # Check if it looks like a date column (DD.MM format)
+            if re.match(r"^\d{2}\.\d{2}", header_d):
+                # Check for incomplete tasks in column D
+                incomplete = self.get_incomplete_tasks(tasks, worksheet, col_idx=4)
+                if incomplete:
+                    return 4, incomplete
 
-        # Insert new column at position D (index 4)
+        # Column D is complete or doesn't exist - create new column
+        now = datetime.now()
+        column_name = now.strftime("%d.%m %H:00")
+
+        # Check if current hour column already exists at D
+        if len(headers) >= 4 and headers[3] == column_name:
+            return 4, tasks
+
+        # Insert new column at position D
         worksheet.insert_cols([[""]], col=4)
         worksheet.update_cell(1, 4, column_name)
-        logger.info(f"Inserted new column '{column_name}' at position D")
-        return 4
+        return 4, tasks
 
     def _get_hourly_columns_for_date(self, headers: list[str], date_str: str) -> list[int]:
         """
@@ -188,16 +227,12 @@ class PositionTracker:
         # Check if summary already exists
         summary_header = f"{date_str} (итог)"
         if summary_header in headers:
-            logger.info(f"Summary column '{summary_header}' already exists, skipping")
             return False
 
         hourly_columns = self._get_hourly_columns_for_date(headers, date_str)
 
         if len(hourly_columns) < 1:
-            logger.info(f"No hourly columns found for {date_str}, skipping summary")
             return False
-
-        logger.info(f"Creating summary for {date_str} from {len(hourly_columns)} hourly columns")
 
         # Get all data
         all_data = worksheet.get_all_values()
@@ -250,7 +285,6 @@ class PositionTracker:
         blue_color = {"red": 0.7, "green": 0.85, "blue": 1.0}  # Light blue
         worksheet.format(f"D1:D{num_rows}", {"backgroundColor": blue_color})
 
-        logger.info(f"Created summary column '{summary_header}' with blue background")
         return True
 
     async def _write_cell_async(
@@ -304,7 +338,7 @@ class PositionTracker:
         worker_id: int,
     ) -> tuple[SearchTask, str, Page]:
         """Process a single search task. Returns (task, result, page)."""
-        logger.info(f"[Worker {worker_id}] [{task_num}/{total_tasks}] Article: {task.article}, Query: {task.query}")
+        logger.debug(f"[W{worker_id}] [{task_num}/{total_tasks}] {task.article}: {task.query}")
 
         position = None
         for attempt in range(3):
@@ -372,34 +406,43 @@ class PositionTracker:
         is_found = position is not None and position > 0
         if is_found:
             result = str(position)
+            logger.info(f"[{self._short_id}] {task.article}: {result}")
         elif position is None:
             result = f"{max_position}+"
+            logger.info(f"[{self._short_id}] {task.article}: {result} (не найден)")
         else:
             result = "—"
+            logger.info(f"[{self._short_id}] {task.article}: {result} (ошибка)")
 
-        logger.info(f"[Worker {worker_id}] Position for {task.article}: {result}")
         return (task, result, page, is_found)
 
-    async def _worker(
-        self,
-        worker_id: int,
-        task_queue: asyncio.Queue,
-        total_tasks: int,
-        max_position: int,
-        worksheet,
-        col_idx: int,
-        results: list,
-    ) -> None:
-        """Worker that processes tasks from queue."""
-        page = await self._get_fresh_page(worker_id)
+    async def run(self, max_position: int = 1000) -> None:
+        """Run position tracking for all tasks in single spreadsheet (single tab)."""
+        spreadsheet_name = self.sheets.spreadsheet.title
+        self._short_id = self.sheets.spreadsheet_id[:8]
+
+        worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
+        all_tasks = self.get_tasks_from_sheet()
+
+        if not all_tasks:
+            logger.warning(f"[{self._short_id}] No tasks in '{spreadsheet_name}'")
+            return
+
+        # Get column and tasks to process (may resume incomplete)
+        col_idx, tasks = self.get_column_for_tracking(all_tasks, worksheet)
+
+        if len(tasks) < len(all_tasks):
+            logger.info(
+                f"[{self._short_id}] {spreadsheet_name}: resuming {len(tasks)}/{len(all_tasks)} incomplete"
+            )
+        else:
+            logger.info(f"[{self._short_id}] {spreadsheet_name}: {len(tasks)} queries")
+
+        page = await self._get_fresh_page(0)
+        results: list = []
 
         try:
-            while True:
-                try:
-                    task_num, task = task_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-
+            for task_num, task in enumerate(tasks, 1):
                 # Short random delay between tasks
                 if task_num > 1:
                     await asyncio.sleep(random.uniform(0.5, 1.5))
@@ -407,63 +450,20 @@ class PositionTracker:
                 is_found = False
                 try:
                     task, result, page, is_found = await self._process_single_task(
-                        task, task_num, total_tasks, max_position, page, worker_id
+                        task, task_num, len(tasks), max_position, page, worker_id=0
                     )
                 except Exception as e:
-                    logger.error(f"[Worker {worker_id}] Fatal error: {e}")
+                    logger.error(f"[{self._short_id}] Fatal error: {e}")
                     result = "—"
-                    # Try to get fresh page for next task
                     try:
-                        page = await self._get_fresh_page(worker_id)
+                        page = await self._get_fresh_page(0)
                     except Exception:
-                        logger.error(f"[Worker {worker_id}] Cannot recover, stopping")
-                        task_queue.task_done()
+                        logger.error(f"[{self._short_id}] Cannot recover, stopping")
                         break
 
                 results.append((task, result))
-
-                # Write result immediately (green if found)
                 await self._write_cell_async(worksheet, task.row_index, col_idx, result, is_found)
-
-                task_queue.task_done()
         finally:
             await self._safe_close_page(page)
 
-    async def run(self, max_position: int = 1000) -> None:
-        """Run position tracking for all tasks with parallel workers."""
-        worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
-        tasks = self.get_tasks_from_sheet()
-
-        if not tasks:
-            logger.warning("No tasks found")
-            return
-
-        col_idx = self.get_or_create_hourly_column(worksheet)
-        num_workers = min(settings.parallel_tabs, len(tasks))
-
-        logger.info(
-            f"Starting position tracking: {len(tasks)} queries, "
-            f"{num_workers} parallel tabs, max position {max_position}"
-        )
-
-        # Create task queue
-        task_queue: asyncio.Queue = asyncio.Queue()
-        for i, task in enumerate(tasks, 1):
-            await task_queue.put((i, task))
-
-        results: list = []
-
-        # Start workers with staggered delay
-        workers = []
-        for worker_id in range(num_workers):
-            if worker_id > 0:
-                await asyncio.sleep(random.uniform(1, 2))  # Stagger worker starts
-            worker = asyncio.create_task(
-                self._worker(worker_id, task_queue, len(tasks), max_position, worksheet, col_idx, results)
-            )
-            workers.append(worker)
-
-        # Wait for all workers to complete
-        await asyncio.gather(*workers)
-
-        logger.info(f"Position tracking completed: {len(results)}/{len(tasks)} tasks processed")
+        logger.info(f"[{self._short_id}] Done: {len(results)}/{len(tasks)}")
