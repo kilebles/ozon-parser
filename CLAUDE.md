@@ -15,8 +15,14 @@ uv sync
 # Install Playwright browsers (required first time)
 uv run playwright install
 
-# Run the position tracker
+# Run the position tracker (original)
 uv run python app/main.py
+
+# Run with Playwright enhanced anti-bot (recommended for servers)
+uv run python app/main_playwright.py
+
+# Run with Selenium (Chrome/Edge) enhanced anti-bot
+uv run python app/main_selenium.py
 
 # Run with visible browser (debugging)
 BROWSER_HEADLESS=false uv run python app/main.py
@@ -32,13 +38,17 @@ No test or lint commands are currently configured.
 
 ```
 app/
-├── main.py              # Entry point - runs position tracker
+├── main.py              # Entry point - runs position tracker (original)
+├── main_playwright.py   # Entry point - Playwright with enhanced anti-bot
+├── main_selenium.py     # Entry point - Selenium (Chrome/Edge) with enhanced anti-bot
 ├── settings.py          # Pydantic Settings config (.env support)
 ├── schemas/product.py   # Product Pydantic model
 └── services/
-    ├── parser.py            # OzonParser - Playwright browser automation
-    ├── sheets.py            # GoogleSheetsService - Google Sheets API
-    └── position_tracker.py  # Orchestrates tracking tasks
+    ├── parser.py             # OzonParser - Original Playwright automation
+    ├── parser_playwright.py  # OzonParserPlaywright - Enhanced Playwright with stealth
+    ├── parser_selenium.py    # OzonParserSelenium - Selenium with stealth
+    ├── sheets.py             # GoogleSheetsService - Google Sheets API
+    └── position_tracker.py   # Orchestrates tracking tasks
 ```
 
 **Execution flow:** `main.py` → connects to Google Sheets → launches Playwright browser → reads search tasks from sheet → finds product positions on Ozon → writes results to daily columns.

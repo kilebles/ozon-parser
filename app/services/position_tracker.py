@@ -9,7 +9,6 @@ from playwright.async_api import Page
 from app.logging_config import get_logger
 from app.services.parser import OzonParser, OzonBlockedError, OzonPageLoadError
 from app.services.sheets import GoogleSheetsService
-from app.services.telegram import get_telegram_notifier
 
 logger = get_logger(__name__)
 
@@ -29,57 +28,7 @@ class PositionTracker:
     ) -> None:
         self.sheets = sheets_service
         self.parser = parser
-        self.telegram = get_telegram_notifier()
         self._short_id: str = ""  # Set in run()
-
-    async def _take_screenshot(self, page: Page) -> bytes | None:
-        """Take screenshot with fallback methods."""
-        # Method 1: standard screenshot with disabled animations
-        try:
-            return await page.screenshot(
-                timeout=3000,
-                animations="disabled",
-            )
-        except Exception as e:
-            logger.debug(f"Standard screenshot failed: {e}")
-
-        # Method 2: CDP screenshot (bypasses some issues)
-        try:
-            cdp = await page.context.new_cdp_session(page)
-            result = await cdp.send("Page.captureScreenshot", {"format": "png"})
-            await cdp.detach()
-            import base64
-            return base64.b64decode(result["data"])
-        except Exception as e:
-            logger.debug(f"CDP screenshot failed: {e}")
-
-        return None
-
-    async def _notify_error(
-        self, message: str, page: Page | None = None
-    ) -> None:
-        """Send error notification to Telegram with optional screenshot."""
-        if not self.telegram.enabled:
-            return
-
-        screenshot: bytes | None = None
-        if page:
-            logger.debug("Taking screenshot for error notification...")
-            screenshot = await self._take_screenshot(page)
-            if screenshot:
-                logger.debug(f"Screenshot taken, size: {len(screenshot)} bytes")
-            else:
-                logger.warning("All screenshot methods failed")
-
-        if screenshot:
-            logger.debug("Sending screenshot to Telegram...")
-            sent = await self.telegram.send_photo(screenshot, f"<b>Ошибка</b>\n{message}")
-            if sent:
-                logger.debug("Screenshot sent successfully")
-                return
-            logger.warning("Failed to send screenshot to Telegram, sending text only")
-
-        await self.telegram.send_message(f"<b>Ошибка</b>\n{message}")
 
     def get_tasks_from_sheet(self) -> list[SearchTask]:
         """Parse the sheet and return list of search tasks."""
@@ -351,18 +300,12 @@ class PositionTracker:
                 )
             except OzonBlockedError:
                 logger.warning(f"[Worker {worker_id}] Block detected")
-                await self._notify_error(
-                    f"[W{worker_id}] Блокировка Ozon при поиске '{task.query}'", page
-                )
                 await self._safe_close_page(page)
                 page = await self._get_fresh_page(worker_id)
                 await asyncio.sleep(random.uniform(5, 10))
                 continue
             except OzonPageLoadError as e:
                 logger.warning(f"[Worker {worker_id}] Page load error (attempt {attempt + 1}/3): {e}")
-                await self._notify_error(
-                    f"[W{worker_id}] Ошибка загрузки '{task.query}' (попытка {attempt + 1}/3)", page
-                )
                 await self._safe_close_page(page)
                 page = await self._get_fresh_page(worker_id)
                 await asyncio.sleep(random.uniform(3, 6))
@@ -377,15 +320,11 @@ class PositionTracker:
                     continue
                 if "ERR_TIMED_OUT" in error_str or "Timeout" in error_str:
                     logger.warning(f"[Worker {worker_id}] Timeout error (attempt {attempt + 1}/3): {e}")
-                    await self._notify_error(
-                        f"[W{worker_id}] Таймаут '{task.query}' (попытка {attempt + 1}/3)", page
-                    )
                     await self._safe_close_page(page)
                     page = await self._get_fresh_page(worker_id)
                     await asyncio.sleep(random.uniform(3, 6))
                     continue
                 logger.error(f"[Worker {worker_id}] Error processing query '{task.query}': {e}")
-                await self._notify_error(f"[W{worker_id}] Ошибка '{task.query}': {e}", page)
                 position = -1
                 break
 
@@ -397,10 +336,6 @@ class PositionTracker:
                     page = await self._get_fresh_page(worker_id)
                     await asyncio.sleep(random.uniform(3, 6))
                     continue
-                else:
-                    await self._notify_error(
-                        f"[W{worker_id}] Блокировка при поиске '{task.query}'", page
-                    )
             break
 
         is_found = position is not None and position > 0

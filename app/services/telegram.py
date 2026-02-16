@@ -37,12 +37,9 @@ class TelegramNotifier:
                             chat_id = update["message"]["chat"]["id"]
                             self._chat_ids.add(chat_id)
 
-                if not self._chat_ids:
-                    logger.warning(
-                        "No users found. Someone needs to /start the bot first."
-                    )
+                # Silently ignore if no users - don't spam logs
         except Exception as e:
-            logger.error(f"Failed to fetch Telegram chat_ids: {e}")
+            logger.debug(f"Telegram fetch failed: {e}")
 
         return self._chat_ids
 
