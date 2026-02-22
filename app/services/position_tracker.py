@@ -2,7 +2,7 @@ import asyncio
 import random
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from playwright.async_api import Page
 
@@ -124,25 +124,6 @@ class PositionTracker:
         worksheet.update_cell(1, 4, column_name)
         return 4, tasks
 
-    def _get_hourly_columns_for_date(self, headers: list[str], date_str: str) -> list[int]:
-        """
-        Find all hourly columns for a specific date.
-        Returns list of 1-based column indices.
-
-        Args:
-            headers: List of column headers
-            date_str: Date in format "DD.MM" (e.g., "03.02")
-        """
-        # Pattern: "28.01 14:00" or "28.01 6:00" (date with hour, 1 or 2 digits)
-        pattern = re.compile(rf"^{re.escape(date_str)} \d{{1,2}}:\d{{2}}$")
-
-        columns = []
-        for i, header in enumerate(headers):
-            if pattern.match(header):
-                columns.append(i + 1)  # 1-based index
-
-        return columns
-
     @staticmethod
     def _col_letter(col_num: int) -> str:
         """Convert column number (1-based) to letter (A, B, ..., Z, AA, AB, ...)."""
@@ -151,90 +132,6 @@ class PositionTracker:
             col_num, remainder = divmod(col_num - 1, 26)
             result = chr(65 + remainder) + result
         return result
-
-    def create_daily_summary(self, date_str: str | None = None) -> bool:
-        """
-        Create a summary column with daily averages at column D.
-        Does NOT delete hourly columns - just adds a new summary column.
-        Summary column has blue background and header format "DD.MM (итог)".
-
-        Called by scheduler at 11:00.
-
-        Args:
-            date_str: Date to summarize in "DD.MM" format. If None, uses yesterday.
-
-        Returns:
-            True if summary was created, False otherwise.
-        """
-        worksheet = self.sheets.get_worksheet(self.WORKSHEET_NAME)
-        headers = worksheet.row_values(1)
-
-        if date_str is None:
-            # Use yesterday by default (summary at 11:00 is for previous day)
-            date_str = (datetime.now() - timedelta(days=1)).strftime("%d.%m")
-
-        # Check if summary already exists
-        summary_header = f"{date_str} (итог)"
-        if summary_header in headers:
-            return False
-
-        hourly_columns = self._get_hourly_columns_for_date(headers, date_str)
-
-        if len(hourly_columns) < 1:
-            return False
-
-        # Get all data
-        all_data = worksheet.get_all_values()
-        num_rows = len(all_data)
-
-        # Calculate averages for each row
-        averages = []
-        for row_idx in range(1, num_rows):  # Skip header
-            values = []
-            for col_idx in hourly_columns:
-                if col_idx <= len(all_data[row_idx]):
-                    cell_value = all_data[row_idx][col_idx - 1]
-                    if cell_value:
-                        if cell_value.endswith("+"):
-                            values.append(1000)
-                        else:
-                            try:
-                                values.append(int(cell_value))
-                            except ValueError:
-                                pass
-
-            if values:
-                avg = sum(values) / len(values)
-                if avg >= 1000:
-                    averages.append("1000+")
-                else:
-                    averages.append(str(round(avg)))
-            else:
-                averages.append("")
-
-        # Insert new column at position D (index 4)
-        worksheet.insert_cols([[""]], col=4)
-        worksheet.update_cell(1, 4, summary_header)
-
-        # Write averages
-        if averages:
-            cells_to_update = []
-            for row_idx, avg in enumerate(averages, start=2):
-                cells_to_update.append({
-                    'range': f'D{row_idx}',
-                    'values': [[avg]]
-                })
-
-            # Batch update in chunks
-            for i in range(0, len(cells_to_update), 100):
-                chunk = cells_to_update[i:i+100]
-                worksheet.batch_update(chunk)
-
-        # Apply blue background to entire summary column
-        blue_color = {"red": 0.7, "green": 0.85, "blue": 1.0}  # Light blue
-        worksheet.format(f"D1:D{num_rows}", {"backgroundColor": blue_color})
-
-        return True
 
     async def _write_cell_async(
         self, worksheet, row: int, col: int, value: str, is_found: bool = False

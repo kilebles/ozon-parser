@@ -39,14 +39,11 @@ ID таблицы — из URL: `docs.google.com/spreadsheets/d/[ЭТО_ID]/edit
 ## Запуск
 
 ```bash
-# Один раз
-uv run python app/main.py --once
-
-# По расписанию (каждые 2 часа)
+# Запуск трекинга
 uv run python app/main.py
 
-# Дневной итог вручную
-uv run python app/main.py --summary
+# Playwright с усиленной защитой от ботов (рекомендуется для серверов)
+uv run python app/main_playwright.py
 ```
 
 ## Логи
